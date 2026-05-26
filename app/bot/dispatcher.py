@@ -10,7 +10,7 @@ async def dispatch(update, thinking_msg_id: int | None = None) -> str | None:
 
     Flow:
     1. Slash commands → resolved to plugin directly
-    2. Free text → StudyPlugin (RAG query agent)
+    2. Free text → BrainPlugin (Gemini agent) → routes to StudyPlugin tools
     """
     message = update.message or update.edited_message
     if not message or not message.text:
@@ -43,13 +43,20 @@ async def dispatch(update, thinking_msg_id: int | None = None) -> str | None:
                 return f"⚠️ Error processing `/{command}`."
         return None
 
-    # 2. Free text → StudyPlugin
+    # 2. Free text → BrainPlugin (Gemini agent)
     registry = PluginRegistry.get()
-    study = registry.get_plugin("study")
-    if study:
+    brain = registry.get_plugin("brain")
+    if brain:
         try:
-            reply = await study.handle(ctx)
+            reply = await brain.handle(ctx)
             return reply
         except Exception as e:
-            logger.error("Study plugin failed: %s", e, exc_info=True)
+            logger.error("Brain plugin failed: %s", e, exc_info=True)
+            # Fallback: try StudyPlugin directly
+            study = registry.get_plugin("study")
+            if study:
+                try:
+                    return await study.handle(ctx)
+                except Exception as e2:
+                    logger.error("Study fallback also failed: %s", e2)
     return None

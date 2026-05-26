@@ -154,6 +154,4 @@ async def webhook(request: Request) -> Response:
     return Response(status_code=200)
 
 
-@router.get("/health")
-async def health():
-    return {"status": "ok", "model": settings.ollama_llm_model}
+

@@ -305,3 +305,92 @@ class StudyPlugin(Plugin):
                 f"`{str(e)[:300]}`\n\n"
                 "Make sure Ollama is running (`ollama serve`)."
             )
+
+
+# ── Module-level tool functions (imported by BrainPlugin) ──
+
+
+async def ask_query(query: str) -> str:
+    """Query the document index and return the answer.
+
+    Used by BrainPlugin's ask() tool.
+    """
+    global _rag_engine, _doc_indexer
+
+    if _rag_engine is None or _doc_indexer is None:
+        return "⚠️ RAG engine not initialized. Restart the bot."
+
+    try:
+        index = await _doc_indexer.ensure_index()
+        _rag_engine.set_index(index)
+
+        # Check if we have documents
+        from app.database import get_db
+        db = await get_db()
+        cursor = await db.execute("SELECT COUNT(*) as cnt FROM documents")
+        row = await cursor.fetchone()
+        if not row or row["cnt"] == 0:
+            return "📭 No documents indexed yet! Run `/index` first."
+
+        logger.info("ask_query: %s", query[:100])
+        return await _rag_engine.query(query, mode="qa")
+    except Exception as e:
+        logger.error("ask_query failed: %s", e, exc_info=True)
+        return f"⚠️ Query failed: {e}"
+
+
+async def generate_quiz(topic: str, count: int = 5) -> str:
+    """Generate practice questions on a topic.
+
+    Used by BrainPlugin's quiz() tool.
+    """
+    global _rag_engine, _doc_indexer
+
+    if _rag_engine is None or _doc_indexer is None:
+        return "⚠️ RAG engine not initialized. Restart the bot."
+
+    try:
+        index = await _doc_indexer.ensure_index()
+        _rag_engine.set_index(index)
+
+        from app.database import get_db
+        db = await get_db()
+        cursor = await db.execute("SELECT COUNT(*) as cnt FROM documents")
+        row = await cursor.fetchone()
+        if not row or row["cnt"] == 0:
+            return "📭 No documents indexed yet! Run `/index` first."
+
+        logger.info("generate_quiz: %s (count=%d)", topic[:80], count)
+        enhanced_topic = f"Generate {count} practice questions about: {topic}"
+        return await _rag_engine.query(enhanced_topic, mode="quiz")
+    except Exception as e:
+        logger.error("generate_quiz failed: %s", e, exc_info=True)
+        return f"⚠️ Quiz generation failed: {e}"
+
+
+async def summarize_topic(topic: str) -> str:
+    """Generate a summary of a topic.
+
+    Used by BrainPlugin's summarize() tool.
+    """
+    global _rag_engine, _doc_indexer
+
+    if _rag_engine is None or _doc_indexer is None:
+        return "⚠️ RAG engine not initialized. Restart the bot."
+
+    try:
+        index = await _doc_indexer.ensure_index()
+        _rag_engine.set_index(index)
+
+        from app.database import get_db
+        db = await get_db()
+        cursor = await db.execute("SELECT COUNT(*) as cnt FROM documents")
+        row = await cursor.fetchone()
+        if not row or row["cnt"] == 0:
+            return "📭 No documents indexed yet! Run `/index` first."
+
+        logger.info("summarize_topic: %s", topic[:80])
+        return await _rag_engine.query(topic, mode="summary")
+    except Exception as e:
+        logger.error("summarize_topic failed: %s", e, exc_info=True)
+        return f"⚠️ Summary failed: {e}"

@@ -181,3 +181,8 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8123
 26. ✅ Context window limited to 8192 (saves VRAM)
 27. ✅ Error feedback (user sees *why* something failed)
 28. ✅ Model switched to qwen2.5:7b (fits 8GB GPU)
+
+### 🔄 Phase 5: Agentic Brain (Option C) — PLANNED
+See [PLAN_agentic.md](PLAN_agentic.md) for full details.
+
+_BrainPlugin with Gemini agent + tool definitions._

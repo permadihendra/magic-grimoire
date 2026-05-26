@@ -14,11 +14,18 @@ class Settings(BaseSettings):
     telegram_webhook_secret: str = ""
     allowed_chat_ids: list[int] = []
 
-    # ── Ollama ────────────────────────────────────────────
+    # ── Gemini (Agent Brain) ──────────────────────────────
+    gemini_api_key: str = ""
+    llm_provider: str = "gemini"
+    llm_model: str = "gemini-2.5-flash-lite"
+    llm_max_tokens: int = 1024
+    llm_timeout: float = 30.0
+
+    # ── Ollama (RAG Engine) ───────────────────────────────
     ollama_base_url: str = "http://localhost:11434"
-    ollama_llm_model: str = "qwen3:4b"
+    ollama_llm_model: str = "qwen2.5:7b"
     ollama_embed_model: str = "nomic-embed-text"
-    ollama_timeout: float = 60.0
+    ollama_timeout: float = 300.0
 
     # ── RAG ───────────────────────────────────────────────
     docs_dir: str = "app/docs"
@@ -41,9 +48,13 @@ class Settings(BaseSettings):
             return [int(x.strip()) for x in v.split(",") if x.strip()]
         return v
 
-
-# Module-level singleton
-settings = Settings()
+    @field_validator("llm_provider")
+    @classmethod
+    def validate_provider(cls, v: str) -> str:
+        allowed = {"gemini"}
+        if v not in allowed:
+            raise ValueError(f"llm_provider must be one of: {allowed}")
+        return v
 
 
 # Module-level singleton
