@@ -124,32 +124,15 @@ async def webhook(request: Request) -> Response:
         )
         return Response(status_code=200)
 
-    # Send thinking indicator first, then process
-    thinking_msg = await _send_telegram_message(
-        message.chat_id, "⏳ Searching the grimoire…"
-    )
-    thinking_msg_id = thinking_msg.get("message_id") if thinking_msg else None
-
+    # Process — BrainPlugin manages thinking indicators internally for slow ops
     try:
-        reply = await dispatch(update, thinking_msg_id)
+        reply = await dispatch(update, None)
     except Exception as e:
         logger.error("Dispatch failed: %s", e, exc_info=True)
         reply = "⚠️ Sorry, something went wrong processing your request."
 
     if reply:
-        if thinking_msg_id:
-            ok = await _edit_message_text(message.chat_id, thinking_msg_id, reply)
-            if not ok:
-                await _send_telegram_message(message.chat_id, reply)
-        else:
-            await _send_telegram_message(message.chat_id, reply)
-    else:
-        if thinking_msg_id:
-            await _edit_message_text(
-                message.chat_id,
-                thinking_msg_id,
-                "🤔 Hmm, I couldn't find anything relevant. Try a different question or `/help`.",
-            )
+        await _send_telegram_message(message.chat_id, reply)
 
     return Response(status_code=200)
 

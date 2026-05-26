@@ -239,6 +239,42 @@ async def _tool_chat(text: str) -> str:
         return "Hey! 😊 I'm here to help you study. Ask me anything about your documents!"
 
 
+# ── Slow tools (need thinking indicator) ─────────────────
+# These take >5s due to Ollama LLM generation
+_SLOW_TOOLS = {"ask", "quiz", "summarize"}
+
+
+async def _send_telegram_message(chat_id: int, text: str) -> dict | None:
+    """Send a Telegram message and return the result (with message_id)."""
+    import httpx
+    url = f"https://api.telegram.org/bot{settings.telegram_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(url, json=payload)
+        if resp.status_code == 400:
+            payload.pop("parse_mode", None)
+            resp = await client.post(url, json=payload)
+        if resp.status_code == 200:
+            return resp.json().get("result")
+    return None
+
+
+async def _edit_message(chat_id: int, message_id: int, text: str) -> bool:
+    """Edit a Telegram message. Returns True on success."""
+    import httpx
+    url = f"https://api.telegram.org/bot{settings.telegram_token}/editMessageText"
+    payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "Markdown"}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(url, json=payload)
+            if resp.status_code == 400:
+                payload.pop("parse_mode", None)
+                resp = await client.post(url, json=payload)
+            return resp.status_code == 200
+    except Exception:
+        return False
+
+
 # ── Tool registry ─────────────────────────────────────────
 _TOOL_REGISTRY = {
     "ask": _tool_ask,
@@ -290,30 +326,73 @@ class BrainPlugin(Plugin):
         # ── 2. Check for TOOL: lines ─────────────────────
         if "TOOL:" not in response:
             _remember(chat_id, message, response)
-            return response
+            return response  # Fast path — gateway sends reply
 
-        # ── 3. Process TOOL: lines ────────────────────────
+        # ── 3. Parse tools from response ────────────────────
         lines = response.split("\n")
-        result_lines = []
+        tool_tasks = []
+        conversational_parts = []
 
         for line in lines:
             if "TOOL:" in line:
                 parsed = _parse_tool(line)
                 if parsed:
-                    tool_name, params = parsed
-                    tool_fn = _TOOL_REGISTRY.get(tool_name)
-                    if tool_fn:
-                        logger.info("Brain: executing tool '%s' with %s", tool_name, params)
-                        tool_result = await tool_fn(**params)
-                        result_lines.append(tool_result)
-                    else:
-                        logger.warning("Brain: unknown tool '%s'", tool_name)
-                        result_lines.append(f"⚠️ Unknown tool: {tool_name}")
-                else:
-                    result_lines.append(line)
+                    tool_tasks.append(parsed)
             else:
-                result_lines.append(line)
+                if line.strip():
+                    conversational_parts.append(line)
 
-        final_reply = "\n\n".join(result_lines).strip()
+        is_slow = any(t in _SLOW_TOOLS for t, _ in tool_tasks)
+
+        # ── 4a. Slow path — send thinking, execute, edit ────
+        if is_slow:
+            # Pick appropriate thinking text
+            tool_names = [t for t, _ in tool_tasks]
+            if "ask" in tool_names:
+                thinking_text = "📖 Searching documents for relevant passages..."
+            elif "quiz" in tool_names:
+                thinking_text = "📝 Generating practice questions..."
+            elif "summarize" in tool_names:
+                thinking_text = "📊 Creating topic summary..."
+            else:
+                thinking_text = "⏳ Processing..."
+
+            thinking_msg = await _send_telegram_message(chat_id, thinking_text)
+            thinking_id = thinking_msg.get("message_id") if thinking_msg else None
+
+            # Execute tools
+            result_lines = []
+            for t_name, t_params in tool_tasks:
+                tool_fn = _TOOL_REGISTRY.get(t_name)
+                if tool_fn:
+                    logger.info("Brain: executing tool '%s' with %s", t_name, t_params)
+                    result = await tool_fn(**t_params)
+                    result_lines.append(result)
+                else:
+                    result_lines.append(f"⚠️ Unknown tool: {t_name}")
+
+            conv_text = "\n".join(conversational_parts).strip()
+            tool_text = "\n\n".join(result_lines).strip()
+            final_reply = f"{conv_text}\n\n{tool_text}" if conv_text else tool_text
+
+            if thinking_id:
+                await _edit_message(chat_id, thinking_id, final_reply)
+
+            _remember(chat_id, message, final_reply)
+            return None  # Already sent — gateway does nothing
+
+        # ── 4b. Fast path — execute directly, return text ───
+        result_lines = []
+        for t_name, t_params in tool_tasks:
+            tool_fn = _TOOL_REGISTRY.get(t_name)
+            if tool_fn:
+                result = await tool_fn(**t_params)
+                result_lines.append(result)
+            else:
+                result_lines.append(f"⚠️ Unknown tool: {t_name}")
+
+        conv_text = "\n".join(conversational_parts).strip()
+        tool_text = "\n\n".join(result_lines).strip()
+        final_reply = f"{conv_text}\n\n{tool_text}" if conv_text else tool_text
         _remember(chat_id, message, final_reply)
-        return final_reply
+        return final_reply  # Fast path — gateway sends reply

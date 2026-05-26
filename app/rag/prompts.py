@@ -104,12 +104,6 @@ Guidelines:
 Format cleanly in Markdown for Telegram.
 """
 
-
-# ── Document Sources (appended by ask tool) ──────────────
-DOC_SOURCE_FMT = """
-📖 *Source: {filename}*
-"""
-
 # ── Legacy compat ────────────────────────────────────────
 QA_PROMPT = QA_NORMAL
 QUIZ_PROMPT = QUIZ_NORMAL

@@ -6,7 +6,97 @@ Supports difficulty levels and source citations.
 """
 
 import logging
+import re
 from typing import Any
+
+
+def shorten_filename(filename: str) -> str:
+    """Transform ugly filenames into clean, readable book titles.
+
+    Examples:
+      "Statman, Meir - Finance for normal people _ how investors ... (2017).pdf"
+      → "Finance for Normal People"
+
+      "Practical Laravel Develop clean MVC web applications (2022).pdf"
+      → "Practical Laravel"
+    """
+    # Remove extension
+    name = filename.rsplit(".", 1)[0] if "." in filename else filename
+
+    # Remove Zone.Identifier suffix
+    name = name.replace(":Zone.Identifier", "")
+
+    # Remove author prefix: "Author Name - " or "Author Name:"
+    # Only match if the text before " - " looks like an author (contains a comma)
+    # e.g., "Statman, Meir - Finance..." or "Kahneman, Daniel - Thinking..."
+    if "," in name.split("-")[0]:
+        name = re.sub(r"^[^\-]+,\s*[^\-]+\s*[-–]\s*", "", name)
+
+    # Remove year in parentheses
+    name = re.sub(r"\s*\(\d{4}\)\s*", "", name)
+
+    # Remove publisher suffixes like "- Oxford University Press"
+    name = re.sub(r"\s*[-–]\s*[A-Z][a-z]+\s+(University|Press|Books|Publishing|Inc|Ltd|House).*$", "", name, flags=re.IGNORECASE)
+
+    # Remove subtitle after separators
+    name = re.sub(r"\s*[:;]\s*.*$", "", name)
+
+    # Remove trailing descriptor (everything after the main title idea)
+    # e.g., "Practical Laravel Develop clean MVC web applications" → "Practical Laravel"
+    # Keep first 4 meaningful words max
+    name = re.sub(r"\s*[-–]\s*\d+(st|nd|rd|th)?\s*edition", "", name, flags=re.IGNORECASE)
+
+    # Truncate subtitle BEFORE underscore replacement
+    # Subtitles are often separated by " _ ", " – ", " - "
+    for sep in [" _ ", " – ", " - "]:
+        if sep in name:
+            name = name.split(sep)[0]
+            break
+
+    # Underscores → spaces, then collapse
+    name = name.replace("_", " ")
+    name = re.sub(r"\s+", " ", name).strip()
+
+    # Remove trailing year-like numbers
+    name = re.sub(r"\s+\d{4}\s*$", "", name)
+
+    # If still long (>4 words), strip subtitle/descriptor parts
+    words = name.split()
+    if len(words) > 4:
+        # Truncation strategies:
+        # 1. Split at lowercase-starting word (grammatical subtitle)
+        # 2. Split at common verb/descriptor words (PascalCase descriptors)
+        # 3. Split at position 4
+        truncate_at = 4
+        subtitle_verbs = {"develop", "building", "creating", "mastering", "learning",
+                         "practical", "guide", "handbook", "introduction", "advanced",
+                         "modern", "complete", "essential", "professional",
+                         "clean", "mvc", "web", "applications"}
+        for i in range(2, min(len(words), 10)):
+            w = words[i]
+            w_lower = w.lower().strip(",.;:!?")
+            # Lowercase start = grammatical subtitle
+            if w[0].islower() and w_lower not in {"a", "an", "the", "and", "or", "but",
+                                                    "for", "nor", "yet", "so", "of",
+                                                    "in", "on", "at", "to", "by", "with", "from"}:
+                truncate_at = i
+                break
+            # Common subtitle/descriptor word (case-insensitive)
+            if w_lower in subtitle_verbs:
+                truncate_at = i
+                break
+        name = " ".join(words[:truncate_at])
+
+    # Final safety truncation
+    words = name.split()
+    if len(words) > 7:
+        name = " ".join(words[:6]) + "..."
+
+    # Title case
+    if len(name) > 3:
+        name = name.title()
+
+    return name if name else filename[:40]
 
 from llama_index.core import VectorStoreIndex
 from llama_index.core.query_engine import RetrieverQueryEngine
@@ -18,7 +108,7 @@ from app.rag.prompts import (
     get_qa_prompt,
     get_quiz_prompt,
     SUMMARY_PROMPT,
-    DOC_SOURCE_FMT,
+
 )
 
 logger = logging.getLogger(__name__)
@@ -139,8 +229,12 @@ class RAGEngine:
 
         if cited:
             citations = []
+            seen = set()
             for s in cited:
-                citations.append(f"📖 *Source:* `{s['filename']}`")
+                short = shorten_filename(s["filename"])
+                if short not in seen:
+                    seen.add(short)
+                    citations.append(f"📖 *Source:* {short}")
             answer += "\n\n" + "\n".join(citations)
 
         return {
