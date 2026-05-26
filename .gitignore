@@ -32,3 +32,6 @@ Thumbs.db
 *.md:Zone.Identifier
 *.pdf:Zone.Identifier
 *:Zone.Identifier
+
+# User study documents (not code)
+app/docs/*.pdf
