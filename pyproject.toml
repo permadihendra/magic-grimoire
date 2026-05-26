@@ -1,6 +1,7 @@
 [project]
-name = "ai-assistant-light"
-version = "0.3.0"
+name = "magic-grimoire"
+version = "0.1.0"
+description = "Telegram RAG Study Agent — query your documents with LlamaIndex + Ollama"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.111",
@@ -9,21 +10,19 @@ dependencies = [
     "aiosqlite>=0.20",
     "pydantic-settings>=2.2",
     "httpx>=0.27",
-    "apscheduler>=3.10",
     "python-dotenv>=1.0",
-    "duckduckgo-search>=8.1.1",
-    "ddgs>=9.14.4",
+    "llama-index>=0.12",
+    "llama-index-llms-ollama>=0.5",
+    "llama-index-embeddings-ollama>=0.5",
+    "llama-index-readers-file>=0.4",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
-    "respx>=0.21",
     "ruff",
     "mypy",
-    "detect-secrets",
-    "pre-commit",
 ]
 
 [tool.hatch.build.targets.wheel]

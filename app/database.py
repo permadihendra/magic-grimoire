@@ -24,45 +24,31 @@ async def get_db() -> aiosqlite.Connection:
 
 
 async def init_db() -> None:
-    """Run all pending migrations."""
+    """Initialize database tables."""
     db = await get_db()
-    await _run_migrations(db)
-    logger.info("Database initialized successfully")
 
+    # Documents tracking table
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename TEXT NOT NULL,
+            filepath TEXT NOT NULL UNIQUE,
+            file_size INTEGER DEFAULT 0,
+            chunk_count INTEGER DEFAULT 0,
+            indexed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
 
-async def _run_migrations(db: aiosqlite.Connection) -> None:
-    """Discover and run migration files from the migrations/ directory."""
-    migrations_dir = os.path.join(os.path.dirname(__file__), "..", "migrations")
-    migrations_dir = os.path.normpath(migrations_dir)
-
-    if not os.path.isdir(migrations_dir):
-        logger.warning("Migrations directory not found: %s", migrations_dir)
-        return
-
-    # Ensure schema version table exists
-    await db.execute(
-        "CREATE TABLE IF NOT EXISTS _schema_version (version INTEGER PRIMARY KEY)"
-    )
-    cursor = await db.execute("SELECT COALESCE(MAX(version), 0) FROM _schema_version")
-    row = await cursor.fetchone()
-    current_version: int = row[0] if row else 0
-
-    # Discover migration files sorted by name
-    migration_files = sorted(
-        f for f in os.listdir(migrations_dir) if f.endswith(".sql")
-    )
-
-    for filename in migration_files:
-        version = int(filename.split("_")[0])
-        if version <= current_version:
-            continue
-
-        filepath = os.path.join(migrations_dir, filename)
-        with open(filepath, "r") as f:
-            sql = f.read()
-
-        logger.info("Running migration: %s", filename)
-        await db.executescript(sql)
-        await db.execute("INSERT INTO _schema_version (version) VALUES (?)", (version,))
+    # Query history (for future context)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS query_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            query TEXT NOT NULL,
+            response TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
 
     await db.commit()
+    logger.info("Database initialized")

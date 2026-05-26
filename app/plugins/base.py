@@ -10,6 +10,7 @@ class BotContext:
     message_text: str
     is_group: bool
     raw_update: object  # python-telegram-bot Update object
+    thinking_msg_id: int | None = None  # Telegram message_id of the "thinking..." message
 
 
 class Plugin(ABC):

@@ -1,7 +1,7 @@
 from app.plugins.base import BotContext
 
 
-def build_context(update, message_text: str) -> BotContext:
+def build_context(update, message_text: str, thinking_msg_id: int | None = None) -> BotContext:
     """Build a BotContext from a Telegram Update."""
     message = update.message or update.edited_message
     user = message.from_user if message else None
@@ -13,4 +13,5 @@ def build_context(update, message_text: str) -> BotContext:
         message_text=message_text,
         is_group=message.chat.type in ("group", "supergroup") if message else False,
         raw_update=update,
+        thinking_msg_id=thinking_msg_id,
     )

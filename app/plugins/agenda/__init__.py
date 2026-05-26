@@ -1,1 +1,0 @@
-# Agenda plugin — daily agenda management via reminders table

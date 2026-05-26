@@ -1,57 +1,42 @@
-# ai-assistant-light — Agent Guide
+# Magic Grimoire — Agent Guide
 
 ## Project Overview
 
-Lightweight AI assistant for Raspberry Pi 3B. Telegram bot interface with cloud LLM providers and extensible plugins.
+Telegram bot + RAG study agent powered by LlamaIndex and local Ollama models.
+Query your documents conversationally — generate quizzes, summaries, and exam prep.
 
-**Stack:** Python 3.11+ · FastAPI · aiosqlite · python-telegram-bot · httpx · APScheduler
+**Stack:** Python 3.11+ · FastAPI · LlamaIndex · Ollama · aiosqlite · python-telegram-bot
 
-**Architecture:** Telegram webhook → FastAPI → Dispatcher → Plugin → LLM Provider (cloud API)
+**Architecture:** Telegram webhook → FastAPI → Dispatcher → StudyPlugin → RAG Engine (LlamaIndex + Ollama)
 
 ---
 
 ## Repository Layout
 
 ```
-ai-assistant-light/
+magic-grimoire/
 ├── app/
 │   ├── main.py              # FastAPI app factory + lifespan
-│   ├── config.py            # pydantic-settings, module-level singleton
-│   ├── database.py          # aiosqlite + migration runner (WAL mode)
+│   ├── config.py            # pydantic-settings, Ollama-focused
+│   ├── database.py          # aiosqlite — documents + query_history tables
 │   ├── bot/
 │   │   ├── gateway.py       # Telegram webhook receiver (FastAPI route)
-│   │   ├── dispatcher.py    # Pending state → slash commands → BrainPlugin
+│   │   ├── dispatcher.py    # Slash commands → plugins; free text → StudyPlugin
 │   │   ├── middlewares.py   # Rate limiter + auth guard
 │   │   ├── context.py       # BotContext dataclass builder
 │   │   └── setup_webhook.py # One-time webhook registration script
 │   ├── plugins/
 │   │   ├── base.py          # Plugin ABC + PluginRegistry singleton
 │   │   ├── system/          # /start, /help, /ping, /status
-│   │   ├── web_search/      # /search — DuckDuckGo (free, no API key)
-│   │   ├── reminder/        # /remind, /reminders, /cancel
-│   │   ├── notes/           # /notes, /note <id> — save & view notes
-│   │   ├── summarizer/      # /summarize, /lastsummary
-│   │   ├── script_runner/   # /run — sandboxed .sh/.py execution
-│   │   └── brain/           # AI router — free text → Gemini → JSON → route
-│   │       ├── handler.py   # Intent classification + action routing
-│   │       ├── context.py   # Context memory: recent msgs, FTS5 search, pairing
-│   │       ├── state.py     # In-memory pending state tracker
-│   │       └── picker.py    # Inline keyboard time picker
-│   ├── llm/
-│   │   ├── base.py          # LLMProvider ABC + dataclasses
-│   │   ├── router.py        # Provider registry + convenience wrapper
-│   │   ├── prompts.py       # All system prompts (personality injected)
-│   │   └── providers/       # anthropic, openai, openrouter, gemini, opencode
-│   ├── scheduler/
-│   │   └── runner.py        # APScheduler AsyncIOScheduler — polls reminders every 5min
-│   └── models/              # Placeholder (models stored in SQLite)
-├── migrations/               # Numbered SQL migration files (001–008)
-├── scripts/                  # Sandboxed user scripts
-│   ├── ping-pc.sh            # Ping-based PC status check
-│   └── raspberrypi/gpio-scripts/  # GPIO relay scripts for PC power control
-├── deploy/                   # systemd service file
-├── tests/                    # pytest fixtures (tests need writing)
-├── pyproject.toml            # UV-managed, no provider SDKs
+│   │   └── study/           # /ask, /quiz, /docs, /index + free text RAG
+│   ├── rag/
+│   │   ├── models.py        # Ollama LLM + embedding config
+│   │   ├── indexer.py       # Document ingestion with LlamaIndex
+│   │   ├── engine.py        # RAG query engine
+│   │   └── prompts.py       # Study agent prompt templates
+│   └── docs/                # Drop your PDFs/books here!
+├── tests/                   # (placeholder)
+├── pyproject.toml           # UV-managed, LlamaIndex + Ollama deps
 └── .env.example              # Placeholder values only
 ```
 
@@ -74,141 +59,111 @@ class Plugin(ABC):
 
 **Rules:**
 - Each plugin is a folder in `app/plugins/<name>/` with `handler.py`
-- Plugins cannot import each other directly — use `PluginRegistry.get().get_plugin(name)`
-- Max 300 lines per handler (split into sub-modules if exceeded)
 - Use `logging` not `print()`
 
-**Registering a new plugin:**
-1. Create `app/plugins/<name>/handler.py` with a Plugin subclass
-2. Import and register in `app/main.py` lifespan (add to `plugins` list)
-3. Add `.env` entries if needed
-4. Add commands to `.env.example`
-5. Write tests in `tests/test_plugins/`
+### StudyPlugin — RAG Query Agent 📖
 
-### BrainPlugin — Intent Router + Context Memory 🧠
+The `study` plugin handles ALL study-related queries:
 
-The `brain` plugin intercepts ALL non-command messages and:
-1. **Retrieves conversation context** — 20 recent messages + FTS5 search + notes
-2. **Filters noise** — skips `/ping`, `/help`, `/start`, `hello` from context
-3. **Pairs user↔bot** — groups messages into user-bot exchange units
-4. **Calls Gemini** with compressed context + current message
-5. **Parses JSON** `actions[]` array → validates → preview → user confirms
-6. **Routes** to target plugin internally
+| Command/Input | Action |
+|---|---|
+| `/ask <question>` | Query indexed documents with RAG |
+| `/quiz <topic>` | Generate practice questions |
+| `/docs` | List indexed documents |
+| `/index` | Re-index all documents |
+| Free text | Auto-routed to RAG query |
 
-**Context-Aware Flow:**
+**Key Features:**
+- **Progress updates** — during long operations (indexing, querying), bot sends periodic edits to the "thinking" message showing what's happening
+- **Model warm-up** — pre-loads LLM into VRAM on startup (8s warm-up vs 40s cold start)
+- **Retry dedup** — ignores Telegram's duplicate message retries
+- **Error feedback** — if something fails, user sees a helpful message with fix suggestions
+
+**RAG Flow:**
 ```
-User: "search about llamaindex"
-  ↓ stored as type='user'
-Bot: [search results]
-  ↓ stored as type='bot'
-User: "tell me more" (reply or followup)
+User sends message
+  ↓  "⏳ Searching the grimoire…" (thinking message)
+StudyPlugin.handle()
+  ↓  "📖 Loading study materials..." (progress update)
+DocumentIndexer.ensure_index()  → loads/creates vector index
+  ↓  "🔍 Searching documents..." (progress update)
+RAGEngine.query(question, mode)
+  ├─ "qa" → QA_PROMPT + context → Ollama response
+  ├─ "quiz" → QUIZ_PROMPT + context → generated questions
+  └─ "summary" → SUMMARY_PROMPT + context → summary
   ↓
-Context Retriever:
-  ├─ Pair #1: user "search..." + bot [results]
-  ├─ Pair #2: user "tell me more"  + bot [...]
-  └─ FTS5 search: "llamaindex" → match Pair #1
-  ↓ Compressed → inject ke prompt
-Gemini → jawab dengan konteks penuh ✅
+Response → Telegram (edits thinking message)
 ```
 
-**Thinking Indicator:**
-Bot sends `"⏳ Wait, I'm thinking…"` immediately, then edits with the real
-response after LLM finishes. No more awkward silence.
+### SystemPlugin ⚙️
 
-**Context Modules:**
-- `app/plugins/brain/context.py` — ContextRetriever: retrieve, filter, pair, rank, compact
-- `app/plugins/brain/state.py` — in-memory pending state per chat (lost on restart — safe)
-- `app/plugins/brain/picker.py` — inline keyboard time picker (period → hour → minute)
-
-**Action-to-Plugin Mapping:**
-
-| Action | Targets Plugin | Command Template |
-|---|---|---|
-| `chat` | BrainPlugin itself | Returns text directly |
-| `search` | web_search | `/search {query}` |
-| `remind_create` | reminder | `/remind {time} {text}` |
-| `remind_list` | reminder | `/reminders` |
-| `summarize` | summarizer | `/summarize` |
-| `note_save` | notes | Saves via `plugin.save_note()` |
-| `ping` / `help` / `status` / `cost` | system | `/ping` / `/help` / `/status` / `/cost 7` |
-| `pc_on` / `pc_off` / `pc_status` | script_runner | `/run relay-poweron-pc.py` etc. |
-| `cost_report` | system | `/cost 7` — inline token usage + IDR report |
-
-**Brain sub-modules:**
-- `app/plugins/brain/state.py` — in-memory pending state per chat (lost on restart — safe)
-- `app/plugins/brain/picker.py` — inline keyboard time picker (period → hour → minute)
-
-**Agentic Flow (v0.3):**
-All non-command messages go directly to Gemini with tool definitions:
-
-```
-User message → retrieve_context (last 10 messages + FTS5 supplement)
-  ↓
-Gemini agent prompt + tool definitions (remind_create, agenda_query, search, etc.)
-  ↓
-Gemini responds:
-  ├─ "Hello!" → returned directly as conversational text
-  └─ "Got it! ✨ TOOL: remind_create(time=..., text=...)"
-       ↓
-     TOOL: line replaced with tool result, conversational text preserved
-       ↓
-     Full response returned to user
-```
-
-No local intent detection, no confirmation flows, no pending state.
-
-### AgendaPlugin 📋
-
-Agenda is a **UI/UX layer** over the reminders table — no separate storage.
-Shows ALL items for a date with visual ☐ (active) / ☑ (done) markers.
-
-- `/agenda` — today's agenda (all items, including done)
-- `/agenda tomorrow` — tomorrow's agenda
-- `/agenda all` — all upcoming, grouped by date
-- `/done <id>` — mark item as done (sets `fired=1`)
-- `/done all` — mark all today as done
-
-**Queries do NOT filter by `fired`** — done items remain visible with ☑ marker.
-This way: reminder fire → `fired=1` → item still shows in agenda (☑, not gone).
-
-### NotesPlugin 📝
-
-Stores reference information in the `notes` SQLite table. Also serves as a cross-plugin viewer:
-- `/notes` — list all saved notes
-- `/note <id>` — view a note OR view a reminder's source message
-
-### PC Power Control 💻
-
-Brain routes "turn on my pc" / "shutdown" / "pc status" through ScriptRunnerPlugin:
-- Scripts live in `scripts/raspberrypi/gpio-scripts/`
-- Requires `ALLOWED_CHAT_IDS` authorization
-- Requires `PC_IP_ADDRESS` in `.env` for ping status
-- Hardware: relay module on GPIO 17 (BCM)
+| Command | Action |
+|---|---|
+| `/start` | Welcome message |
+| `/help` | Show command list |
+| `/ping` | Health check |
+| `/status` | Bot + index statistics |
 
 ---
 
-## LLM Provider System
+## RAG Architecture
 
-All providers use raw `httpx` — no SDKs. Users select one via `LLM_PROVIDER` in `.env`.
+### Models (`app/rag/models.py`)
 
-| Provider | Class | Required Env | Default Model |
-|---|---|---|---|
-| anthropic | `AnthropicProvider` | `ANTHROPIC_API_KEY` | claude-3-5-haiku-latest |
-| openai | `OpenAIProvider` | `OPENAI_API_KEY` | gpt-4o-mini |
-| openrouter | `OpenRouterProvider` | `OPENROUTER_API_KEY` | (user-specified) |
-| **gemini** ★ | `GeminiProvider` | `GEMINI_API_KEY` | **gemini-2.5-flash-lite** |
-| opencode | `OpenCodeProvider` | `OPENCODE_BASE_URL` | (user-specified) |
-| zen | `OpenCodeProvider` | `ZEN_BASE_URL` | (user-specified) |
+```python
+Ollama LLM:     qwen2.5:7b (default) — 4.7 GB, 8K context window
+Ollama Embed:   nomic-embed-text    — 0.3 GB VRAM
+```
 
-> ★ **Default** — Gemini 2.5 Flash Lite (free tier, 1,500 req/day, no credit card)
+**VRAM budget (8GB GPU):**
+- Model weights: ~4.7 GB
+- Embeddings: ~0.3 GB
+- KV cache + context: ~1.5 GB (8K window)
+- **Total: ~6.5 GB** — comfortable, 1.5 GB headroom
 
-**Adding a new provider:**
-1. `app/config.py` — add `new_provider_api_key: str = ""`
-2. `.env.example` — add placeholder
-3. `app/llm/providers/` — subclass `LLMProvider`
-4. `app/llm/router.py` — add to `_REGISTRY`
-5. `app/config.py` — add to validator's allowed set
-6. `tests/test_llm/` — add test with respx mock
+Configured via LlamaIndex's global `Settings` object.
+
+### Warm-up (`app/rag/models.py`)
+
+On startup, the model is pre-loaded into VRAM with a tiny 2-token chat request.
+This avoids the 30-60s cold-start delay on the first real query.
+Uses Ollama's AsyncClient directly with `num_predict=2`.
+
+### Indexer (`app/rag/indexer.py`)
+
+- Scans `app/docs/` directory for documents
+- Uses `SimpleDirectoryReader` (supports PDF, txt, md, docx, epub)
+- Creates `VectorStoreIndex` with Ollama embeddings
+- Persists to `data/index_storage/` for fast reload
+- Tracks documents in SQLite `documents` table
+
+### Engine (`app/rag/engine.py`)
+
+- Wraps `RetrieverQueryEngine` with custom study prompts
+- Configurable `similarity_top_k` (default: 5)
+- Supports query modes: `qa`, `quiz`, `summary`
+- Returns both answer text and source citations
+
+### Prompts (`app/rag/prompts.py`)
+
+Three prompt templates:
+- `QA_PROMPT` — General Q&A with document context
+- `QUIZ_PROMPT` — Generate mixed-format practice questions
+- `SUMMARY_PROMPT` — Concise topic summaries
+
+All prompts inject `AI_PERSONALITY` from config.
+
+---
+
+## Database Schema
+
+```sql
+documents:
+  id, filename, filepath (unique), file_size, chunk_count, indexed_at
+
+query_history:
+  id, chat_id, query, response, created_at
+```
 
 ---
 
@@ -219,16 +174,14 @@ Coding agent MUST enforce these:
 | Rule | Detail |
 |---|---|
 | `.gitignore` first | Generated before any other file; verified before any git command |
-| No provider SDKs | Use `httpx` for all LLM calls; no `anthropic`, `openai`, `google-generativeai` |
 | `shell=True` forbidden | Always `create_subprocess_exec` with explicit arg list |
 | No threading | `asyncio` only; never `import threading` |
 | Parameterized SQL | All DB writes use `?` placeholders; no f-string SQL |
 | Secrets via `settings` | Every credential from `settings.*`; never hardcoded, never in comments |
-| Secrets never logged | No `logging.debug(settings.anthropic_api_key)` or equivalent |
+| Secrets never logged | No `logging.debug(settings.*)` or equivalent |
 | Explicit HTTP timeouts | Every `httpx` call sets `timeout=` |
 | Log with `logging` | No `print()` in production paths |
-| `.env.example` fake values | e.g. `your-anthropic-api-key-here`, never a real key format |
-| `detect-secrets` baseline | Run `detect-secrets scan` after any new file is added |
+| `.env.example` fake values | e.g. `your-telegram-bot-token-here`, never a real key format |
 
 ---
 
@@ -238,8 +191,6 @@ Coding agent MUST enforce these:
 uv sync                     # Install runtime deps
 uv sync --extra dev         # Install dev deps
 uv run uvicorn app.main:app --reload             # Dev server
-uv run pytest               # Run all tests (none written yet)
-uv run pytest tests/ -v     # Verbose
 uv run ruff check .         # Lint
 uv run ruff check --fix .   # Auto-fix
 uv run mypy app/            # Type check
@@ -249,42 +200,51 @@ uv run python -m app.bot.setup_webhook --delete  # Remove webhook
 
 ---
 
-## Deployment Checklist (Raspberry Pi 3B)
+## Ollama Setup
 
 ```bash
-# One-time
-curl -LsSf https://astral.sh/uv/install.sh | sh
-git clone <repo> ai-assistant-light
-cd ai-assistant-light
-cp .env.example .env && chmod 600 .env  # fill real keys
-uv sync --no-dev
-mkdir -p data
-uv run python -m app.bot.setup_webhook
+# Install Ollama
+curl -fsSL https://ollama.com/install.sh | sh
 
-# systemd service
-sudo cp deploy/ai-assistant.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now ai-assistant
+# Pull recommended models
+ollama pull qwen3:4b        # LLM (~3 GB)
+ollama pull nomic-embed-text  # Embeddings (~0.5 GB)
 
-# If using GPIO relay for PC control:
-sudo usermod -a -G gpio pi   # grant GPIO access
-
-# IMPORTANT: In BotFather, disable Group Privacy mode so bot sees all messages
+# Run Ollama (if not running as service)
+ollama serve
 ```
 
 ---
 
-## Resource Budget (Pi 3B)
+## Deployment Checklist
 
-| Component | Idle RAM |
-|---|---|
-| uvicorn + FastAPI | ~50 MB |
-| python-telegram-bot | ~25 MB |
-| APScheduler | ~5 MB |
-| aiosqlite | ~5 MB |
-| httpx | ~5 MB |
-| Plugins + LLM layer | ~10 MB |
-| **Total idle** | **~100 MB** |
+```bash
+# 1. Install deps
+curl -LsSf https://astral.sh/uv/install.sh | sh
+git clone <repo> magic-grimoire
+cd magic-grimoire
+cp .env.example .env && chmod 600 .env
+uv sync --no-dev
+mkdir -p data app/docs
+
+# 2. Add your documents
+# Copy PDFs/text files to app/docs/
+
+# 3. Start Ollama (ensure it's running)
+ollama list  # verify models are pulled
+
+# 4. Start the bot
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8123
+
+# 5. Register webhook (in another terminal)
+uv run python -m app.bot.setup_webhook
+
+# 6. Index documents via Telegram
+# Send /index to the bot
+
+# 7. Start studying!
+# /ask "What are the main topics in chapter 1?"
+```
 
 ---
 
@@ -293,11 +253,15 @@ sudo usermod -a -G gpio pi   # grant GPIO access
 | Symptom | Likely Cause | Fix |
 |---|---|---|
 | Bot doesn't reply | Webhook not set | Run `uv run python -m app.bot.setup_webhook` |
-| Bot ignores group messages | Privacy mode enabled | Disable in BotFather settings |
-| Webhook 401 | Secret token mismatch | Check `TELEGRAM_WEBHOOK_SECRET` |
-| LLM calls fail | No API key | Set `GEMINI_API_KEY` in `.env` |
-| `/run` blocked | `ALLOWED_CHAT_IDS` not set | Add your Telegram user ID |
-| Brain falls back to chat only | Gemini returned chat action | Try explicit `/search` as workaround |
-| Search fails | DuckDuckGo rate limit | Wait and retry |
-| "No pending actions" | Stale state | Re-send the original request |
-| Reminder time parse fails | Unrecognized format | Use `10m`, `2h`, `tomorrow 09:00`
+| "Index rebuild failed" | Ollama not running | `ollama serve` |
+| "Model not found" | Model not pulled | `ollama pull qwen3:4b` |
+| Empty query results | No docs indexed | Check `app/docs/` → `/index` |
+| Markdown formatting broken | Telegram Markdown limitations | Bot falls back to plain text |
+
+---
+
+## Related
+
+- [PLAN.md](PLAN.md) — Development roadmap
+- [LlamaIndex Docs](https://docs.llamaindex.ai/)
+- [Ollama Models](https://ollama.com/library)

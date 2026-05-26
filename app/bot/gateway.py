@@ -8,11 +8,14 @@ from telegram import Update
 from app.bot.dispatcher import dispatch
 from app.bot.middlewares import check_rate_limit
 from app.config import settings
-from app.database import get_db
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Track recently processed update_ids to ignore Telegram retries
+_processed_updates: set[int] = set()
+MAX_PROCESSED = 100  # keep last 100 IDs to avoid unbounded memory
 
 
 async def _send_telegram_message(chat_id: int, text: str, keyboard=None) -> dict | None:
@@ -33,7 +36,6 @@ async def _send_telegram_message(chat_id: int, text: str, keyboard=None) -> dict
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.post(url, json=payload)
-        # If markdown fails (400), retry as plain text
         if resp.status_code == 400:
             logger.warning("Markdown send failed, retrying as plain text")
             payload.pop("parse_mode", None)
@@ -45,8 +47,8 @@ async def _send_telegram_message(chat_id: int, text: str, keyboard=None) -> dict
             return None
 
 
-async def _edit_message_text(chat_id: int, message_id: int, text: str, keyboard=None) -> None:
-    """Edit a message's text and inline keyboard."""
+async def _edit_message_text(chat_id: int, message_id: int, text: str) -> bool:
+    """Edit a message's text. Returns True on success, False on failure."""
     import httpx
 
     url = f"https://api.telegram.org/bot{settings.telegram_token}/editMessageText"
@@ -56,31 +58,18 @@ async def _edit_message_text(chat_id: int, message_id: int, text: str, keyboard=
         "text": text,
         "parse_mode": "Markdown",
     }
-    if keyboard:
-        payload["reply_markup"] = json.loads(keyboard) if isinstance(keyboard, str) else keyboard
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(url, json=payload)
-        # If markdown fails (400), retry as plain text
-        if resp.status_code == 400:
-            logger.warning("Markdown edit failed, retrying as plain text")
-            payload.pop("parse_mode", None)
-            await client.post(url, json=payload)
-
-
-async def _send_with_keyboard(chat_id: int, text: str, keyboard) -> None:
-    """Send a message with an inline keyboard."""
-    import httpx
-
-    url = f"https://api.telegram.org/bot{settings.telegram_token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown",
-        "reply_markup": keyboard if isinstance(keyboard, dict) else json.loads(keyboard),
-    }
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        await client.post(url, json=payload)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(url, json=payload)
+            if resp.status_code == 400:
+                logger.warning("Markdown edit failed, retrying as plain text")
+                payload.pop("parse_mode", None)
+                resp = await client.post(url, json=payload)
+            return resp.status_code == 200
+    except Exception as e:
+        logger.warning("Failed to edit message %s: %s", message_id, e)
+        return False
 
 
 @router.post("/webhook")
@@ -107,7 +96,16 @@ async def webhook(request: Request) -> Response:
     if not update:
         return Response(status_code=200)
 
-    # ── Handle text messages ────────────────────────────────────
+    # ── Retry dedup: skip already-processed updates ──────────
+    global _processed_updates
+    if update.update_id in _processed_updates:
+        logger.debug("Skipping duplicate update %s", update.update_id)
+        return Response(status_code=200)
+    _processed_updates.add(update.update_id)
+    if len(_processed_updates) > MAX_PROCESSED:
+        _processed_updates = set(list(_processed_updates)[-MAX_PROCESSED:])
+
+    # Handle text messages only
     message = update.message or update.edited_message
     if not message or not message.text:
         logger.debug("Received non-text update: %s", update.update_id)
@@ -126,52 +124,31 @@ async def webhook(request: Request) -> Response:
         )
         return Response(status_code=200)
 
-    # Persist incoming message for context retrieval + summarization
-    try:
-        db = await get_db()
-        await db.execute(
-            "INSERT INTO messages (chat_id, user_id, username, text, type) VALUES (?, ?, ?, ?, 'user')",
-            (message.chat_id, message.from_user.id if message.from_user else 0,
-             message.from_user.username if message.from_user else None,
-             message.text),
-        )
-        await db.commit()
-    except Exception as e:
-        logger.warning("Failed to persist message: %s", e)
-
     # Send thinking indicator first, then process
     thinking_msg = await _send_telegram_message(
-        message.chat_id, "⏳ Wait, I'm thinking…"
+        message.chat_id, "⏳ Searching the grimoire…"
     )
+    thinking_msg_id = thinking_msg.get("message_id") if thinking_msg else None
 
-    reply = await dispatch(update)
+    try:
+        reply = await dispatch(update, thinking_msg_id)
+    except Exception as e:
+        logger.error("Dispatch failed: %s", e, exc_info=True)
+        reply = "⚠️ Sorry, something went wrong processing your request."
+
     if reply:
-        if thinking_msg and thinking_msg.get("message_id"):
-            await _edit_message_text(
-                message.chat_id, thinking_msg["message_id"], reply
-            )
+        if thinking_msg_id:
+            ok = await _edit_message_text(message.chat_id, thinking_msg_id, reply)
+            if not ok:
+                await _send_telegram_message(message.chat_id, reply)
         else:
-            # Thinking message failed to send, send reply fresh
             await _send_telegram_message(message.chat_id, reply)
-
-        # Persist bot response so context retriever has BOTH sides
-        try:
-            db2 = await get_db()
-            await db2.execute(
-                "INSERT INTO messages (chat_id, user_id, username, text, type) "
-                "VALUES (?, 0, 'bot', ?, 'bot')",
-                (message.chat_id, reply[:1500]),  # cap length
-            )
-            await db2.commit()
-        except Exception as e:
-            logger.warning("Failed to persist bot reply: %s", e)
     else:
-        # No reply — update thinking message to something neutral
-        if thinking_msg and thinking_msg.get("message_id"):
+        if thinking_msg_id:
             await _edit_message_text(
                 message.chat_id,
-                thinking_msg["message_id"],
-                "🤔",
+                thinking_msg_id,
+                "🤔 Hmm, I couldn't find anything relevant. Try a different question or `/help`.",
             )
 
     return Response(status_code=200)
@@ -179,4 +156,4 @@ async def webhook(request: Request) -> Response:
 
 @router.get("/health")
 async def health():
-    return {"status": "ok", "provider": settings.llm_provider}
+    return {"status": "ok", "model": settings.ollama_llm_model}
