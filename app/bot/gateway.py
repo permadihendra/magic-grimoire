@@ -105,17 +105,26 @@ async def webhook(request: Request) -> Response:
     if len(_processed_updates) > MAX_PROCESSED:
         _processed_updates = set(list(_processed_updates)[-MAX_PROCESSED:])
 
-    # Handle text messages only
+    # Handle messages — text, document, or other
     message = update.message or update.edited_message
-    if not message or not message.text:
-        logger.debug("Received non-text update: %s", update.update_id)
+    if not message:
+        logger.debug("Received update without message: %s", update.update_id)
         return Response(status_code=200)
 
+    # Allow document messages (they have no text but we handle them)
+    has_text = bool(message.text)
+    has_doc = bool(message.document)
+
+    if not has_text and not has_doc:
+        logger.debug("Received non-text, non-document update: %s", update.update_id)
+        return Response(status_code=200)
+
+    log_text = message.text[:100] if has_text else f"[document: {message.document.file_name}]"
     logger.info(
         "Update %s from chat %s: %s",
         update.update_id,
         message.chat_id,
-        message.text[:100],
+        log_text,
     )
 
     if not check_rate_limit(message.chat_id):
