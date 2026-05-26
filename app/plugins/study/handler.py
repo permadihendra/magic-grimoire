@@ -216,31 +216,9 @@ class StudyPlugin(Plugin):
             return f"⚠️ *Quiz generation failed:* `{str(e)[:300]}`"
 
     async def _handle_docs(self, ctx: BotContext) -> str:
-        """Handle /docs — list indexed documents."""
-        db = await get_db()
-        cursor = await db.execute(
-            "SELECT filename, file_size, chunk_count, indexed_at FROM documents "
-            "ORDER BY indexed_at DESC"
-        )
-        rows = await cursor.fetchall()
-
-        if not rows:
-            return (
-                "📭 *No documents indexed.*\n\n"
-                "Place your study files in `app/docs/` and run `/index`."
-            )
-
-        lines = ["📚 *Indexed Documents*\n"]
-        for r in rows:
-            size_kb = r["file_size"] / 1024 if r["file_size"] else 0
-            chunks = r["chunk_count"] or 0
-            lines.append(
-                f"📄 `{r['filename']}`\n"
-                f"   {size_kb:.0f} KB · {chunks} chunks\n"
-            )
-
-        lines.append(f"\n_Total: {len(rows)} documents_")
-        return "\n".join(lines)
+        """Handle /docs — list indexed documents with professional formatting."""
+        from app.plugins.brain.handler import _tool_list_docs
+        return await _tool_list_docs()
 
     async def _handle_index(self, ctx: BotContext) -> str:
         """Handle /index — re-index all documents with progress."""
@@ -310,8 +288,12 @@ class StudyPlugin(Plugin):
 # ── Module-level tool functions (imported by BrainPlugin) ──
 
 
-async def ask_query(query: str) -> str:
-    """Query the document index and return the answer.
+async def ask_query(query: str, difficulty: str = "normal") -> str:
+    """Query the document index and return the answer with source citations.
+
+    Args:
+        query: Natural language question.
+        difficulty: 'simple', 'normal', or 'advanced'.
 
     Used by BrainPlugin's ask() tool.
     """
@@ -332,15 +314,21 @@ async def ask_query(query: str) -> str:
         if not row or row["cnt"] == 0:
             return "📭 No documents indexed yet! Run `/index` first."
 
-        logger.info("ask_query: %s", query[:100])
-        return await _rag_engine.query(query, mode="qa")
+        logger.info("ask_query: %s (difficulty=%s)", query[:100], difficulty)
+        result = await _rag_engine.query_with_sources(query, difficulty=difficulty)
+        return result["answer"]
     except Exception as e:
         logger.error("ask_query failed: %s", e, exc_info=True)
         return f"⚠️ Query failed: {e}"
 
 
-async def generate_quiz(topic: str, count: int = 5) -> str:
+async def generate_quiz(topic: str, count: int = 5, difficulty: str = "normal") -> str:
     """Generate practice questions on a topic.
+
+    Args:
+        topic: Subject to quiz on.
+        count: Number of questions (1-20).
+        difficulty: 'simple', 'normal', or 'advanced'.
 
     Used by BrainPlugin's quiz() tool.
     """
@@ -360,9 +348,9 @@ async def generate_quiz(topic: str, count: int = 5) -> str:
         if not row or row["cnt"] == 0:
             return "📭 No documents indexed yet! Run `/index` first."
 
-        logger.info("generate_quiz: %s (count=%d)", topic[:80], count)
+        logger.info("generate_quiz: %s (count=%d, difficulty=%s)", topic[:80], count, difficulty)
         enhanced_topic = f"Generate {count} practice questions about: {topic}"
-        return await _rag_engine.query(enhanced_topic, mode="quiz")
+        return await _rag_engine.query(enhanced_topic, mode="quiz", difficulty=difficulty, count=count)
     except Exception as e:
         logger.error("generate_quiz failed: %s", e, exc_info=True)
         return f"⚠️ Quiz generation failed: {e}"

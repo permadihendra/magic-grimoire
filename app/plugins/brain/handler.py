@@ -3,12 +3,17 @@
 Intercepts all non-command messages, sends them to Gemini with
 tool definitions, and executes the chosen tools.
 
-This is Option C: Tool-based agentic flow.
-Gemini decides which tools to call (and can chain multiple).
+Features:
+- Tool-based agentic flow (Option C)
+- Conversation memory (last 5 exchanges per chat)
+- Proactive suggestions after answers
+- Source citations when answering
+- Difficulty levels (simple/normal/advanced)
 """
 
 import logging
 import re
+from collections import defaultdict
 
 from app.config import settings
 from app.llm.gemini import gemini_chat
@@ -16,65 +21,104 @@ from app.plugins.base import BotContext, Plugin
 
 logger = logging.getLogger(__name__)
 
+# ── Conversation memory ──────────────────────────────────
+# {chat_id: [(user_msg, bot_msg), ...]} — last 5 exchanges
+_conversation_memory: dict[int, list[tuple[str, str]]] = defaultdict(list)
+MAX_HISTORY = 5
+
+
+def _build_history_block(chat_id: int) -> str:
+    """Build a conversation history string for Gemini context."""
+    history = _conversation_memory.get(chat_id, [])
+    if not history:
+        return ""
+
+    lines = ["\n--- Recent conversation context ---"]
+    for i, (user_msg, bot_msg) in enumerate(history[-MAX_HISTORY:], 1):
+        lines.append(f"[{i}] User: {user_msg[:200]}")
+        lines.append(f"[{i}] You: {bot_msg[:200]}")
+    lines.append("--- End of context ---\n")
+    return "\n".join(lines)
+
+
+def _remember(chat_id: int, user_msg: str, bot_msg: str) -> None:
+    """Store an exchange in conversation memory."""
+    history = _conversation_memory[chat_id]
+    history.append((user_msg, bot_msg))
+    if len(history) > MAX_HISTORY:
+        _conversation_memory[chat_id] = history[-MAX_HISTORY:]
+
+
 # ── Agent system prompt ───────────────────────────────────
-AGENT_PROMPT = """You are Magic Grimoire, a study assistant agent that helps users learn from their documents. You have tools available — use them when appropriate.
+AGENT_PROMPT = """You are Magic Grimoire, a study assistant agent that helps users learn from their documents. You are BOTH a tutor and a librarian.
+
+As a TUTOR:
+- Teach concepts, don't just answer questions
+- Adapt to the user's level (beginner → advanced)
+- After answering, suggest one relevant next step
+- Check if the user wants a quiz or deeper explanation
+- Connect topics across documents
+
+As a LIBRARIAN:
+- Always cite which document the information comes from (the ask() tool does this automatically)
+- Know what documents are available — use list_docs() when asked
+- Recommend relevant documents for the user's questions
 
 Available tools:
-- TOOL: ask(query) — Query your study documents. Use for:
-  • Questions about specific topics ("what is X?", "explain Y")
-  • Requests for explanations or definitions
-  • Follow-ups and clarifications ("tell me more about that")
+- TOOL: ask(query, difficulty="normal") — Query your study documents.
+  difficulty can be "simple", "normal", or "advanced".
+  Use for: questions, explanations, definitions, follow-ups.
 
-- TOOL: quiz(topic, count=5) — Generate practice questions. Use when:
-  • User asks for a quiz or practice questions
-  • User says "test me", "quiz me", "practice"
+- TOOL: quiz(topic, count=5, difficulty="normal") — Generate practice questions.
+  difficulty can be "simple", "normal", or "advanced".
+  Use for: "quiz me", "test me", "practice questions".
 
-- TOOL: summarize(topic) — Create a topic summary. Use when:
-  • User asks for a summary, overview, or key points
-  • User says "summarize X", "give me the key concepts"
+- TOOL: summarize(topic) — Create a topic summary.
+  Use for: "summarize X", "overview", "key points".
 
-- TOOL: chat(text) — Casual conversation or general chat. Use when:
-  • User greets you ("hi", "hello", "hey")
-  • User gives thanks or feedback ("thanks", "good", "nice")
-  • User asks about you or what you can do
-  • The message is purely conversational with no study intent
+- TOOL: list_docs() — List all indexed documents with details.
+  Use for: "what docs do you have?", "show my documents", "indexed files".
+
+- TOOL: chat(text) — Casual conversation. No document needed.
+  Use for: greetings, thanks, feedback, casual chat.
 
 Rules:
-1. Always respond conversationally first, then add the TOOL: at the END.
-2. For greetings/chat → use chat() tool with a friendly reply.
-3. For "what is X" or "explain Y" → use ask().
-4. For "quiz me" or "test me" → use quiz().
-5. For "summarize X" or "key points" → use summarize().
-6. For "tell me more" or "explain that" → use ask() with the follow-up question.
-7. If user says a topic is too hard/easy → use ask() or quiz() with adjusted difficulty.
-8. You can use MULTIPLE tools in one response if the request is compound.
-9. Keep responses concise and friendly. Use emojis naturally.
-10. Chat in the same language as the user (Indonesian or English).
+1. Always respond conversationally first, then add tool(s) at the END.
+2. Use the conversation context (above) to understand follow-ups.
+3. For follow-ups like "tell me more", "explain that", use ask() with context.
+4. After answering, naturally suggest: a quiz, a related topic, or deeper explanation.
+5. If user seems confused, use difficulty="simple".
+6. If user asks for advanced/detailed content, use difficulty="advanced".
+7. You can chain MULTIPLE tools in one response.
+8. Keep responses concise, friendly, and use emojis naturally.
+9. Respond in the user's language (Indonesian or English).
 
 Format for TOOL lines (put at the END of your response):
 TOOL: tool_name(param1="value1", param2=123)
 
 Examples:
 User: "hello!"
-You: Hey! Ready to study? 📖
-TOOL: chat(text="Hey! I can help you study your documents. Ask me anything!")
+You: Hey! Ready to study? 📖 I can help you learn from your documents!
+TOOL: list_docs()
 
-User: "what is behavioral finance?"
-You: Great question! Let me look that up in your documents...
-TOOL: ask(query="What is behavioral finance?")
+User: "what is loss aversion?"
+You: Great question! Let me look that up in your Finance book...
+TOOL: ask(query="What is loss aversion?", difficulty="normal")
+
+User: "explain it simply"
+You: Sure, let me break it down in plain language!
+TOOL: ask(query="What is loss aversion? Explain simply", difficulty="simple")
 
 User: "quiz me on chapter 3"
 You: Let me generate some practice questions for you! 🧠
-TOOL: quiz(topic="chapter 3", count=5)
+TOOL: quiz(topic="chapter 3", count=5, difficulty="normal")
 
-User: "explain loss aversion and quiz me on it"
-You: Let me find information about loss aversion and then test your knowledge! 📚
-TOOL: ask(query="Explain loss aversion in behavioral finance")
-TOOL: quiz(topic="loss aversion", count=3)
+User: "too easy, make it harder"
+You: Challenge accepted! Here are tougher questions 💪
+TOOL: quiz(topic="chapter 3", count=5, difficulty="advanced")
 """
 
 # ── TOOL regex ────────────────────────────────────────────
-# Matches: TOOL: tool_name(param1="value1", param2=123)
 _TOOL_RE = re.compile(
     r'TOOL:\s*(\w+)\(([^)]*)\)',
     re.IGNORECASE,
@@ -92,7 +136,6 @@ def _parse_tool(line: str) -> tuple[str, dict] | None:
 
     params: dict = {}
     if raw_params:
-        # Simple param parser: key="value" or key=number
         for part in raw_params.split(","):
             part = part.strip()
             if "=" in part:
@@ -105,17 +148,17 @@ def _parse_tool(line: str) -> tuple[str, dict] | None:
 
 
 # ── Tool implementations ──────────────────────────────────
-async def _tool_ask(query: str) -> str:
-    """Execute the ask() tool — RAG query."""
+async def _tool_ask(query: str, difficulty: str = "normal") -> str:
+    """Execute the ask() tool — RAG query with source citations."""
     from app.plugins.study.handler import ask_query
     try:
-        return await ask_query(query)
+        return await ask_query(query, difficulty=difficulty)
     except Exception as e:
         logger.error("ask() failed: %s", e)
-        return f"⚠️ Sorry, I couldn't find an answer: {e}"
+        return f"⚠️ Sorry, I couldn't find an answer.\n\nError: {e}"
 
 
-async def _tool_quiz(topic: str, count: str = "5") -> str:
+async def _tool_quiz(topic: str, count: str = "5", difficulty: str = "normal") -> str:
     """Execute the quiz() tool — generate practice questions."""
     from app.plugins.study.handler import generate_quiz
     try:
@@ -123,7 +166,7 @@ async def _tool_quiz(topic: str, count: str = "5") -> str:
     except (ValueError, TypeError):
         n = 5
     try:
-        return await generate_quiz(topic, n)
+        return await generate_quiz(topic, n, difficulty=difficulty)
     except Exception as e:
         logger.error("quiz() failed: %s", e)
         return f"⚠️ Sorry, quiz generation failed: {e}"
@@ -139,18 +182,61 @@ async def _tool_summarize(topic: str) -> str:
         return f"⚠️ Sorry, summary failed: {e}"
 
 
+async def _tool_list_docs() -> str:
+    """Execute the list_docs() tool — list indexed documents."""
+    from app.database import get_db
+    try:
+        db = await get_db()
+        cursor = await db.execute(
+            "SELECT filename, file_size, chunk_count, indexed_at FROM documents "
+            "ORDER BY indexed_at DESC"
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            return "📭 *No documents indexed yet.*\n\nAdd PDFs to `app/docs/` and run `/index`."
+
+        lines = ["📚 *Indexed Documents*\n"]
+        for r in rows:
+            size_mb = r["file_size"] / (1024 * 1024) if r["file_size"] else 0
+            chunks = r["chunk_count"] or 0
+            indexed = r["indexed_at"] or "unknown"
+
+            # Format timestamp nicely
+            try:
+                from datetime import datetime
+                dt = datetime.strptime(indexed, "%Y-%m-%d %H:%M:%S")
+                indexed_fmt = dt.strftime("%d %b %Y, %H:%M")
+            except (ValueError, TypeError):
+                indexed_fmt = str(indexed)
+
+            name = r["filename"].replace(".pdf", "").replace("-", " ").replace("_", " ")
+            lines.append(f"📄 **{name}**")
+            lines.append(f"   └─ {size_mb:.1f} MB · {chunks} chunks · indexed {indexed_fmt}")
+            lines.append("")
+
+        lines.append(f"_Total: {len(rows)} documents_")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error("list_docs() failed: %s", e)
+        return f"⚠️ Failed to list documents: {e}"
+
+
 async def _tool_chat(text: str) -> str:
     """Execute the chat() tool — direct Ollama conversation (no RAG)."""
     from app.rag.models import get_llm
     try:
         llm = get_llm()
         personality = settings.ai_personality.strip()
-        prompt = f"Personality: {personality}\n\nRespond conversationally to: {text}" if personality else f"Respond conversationally to: {text}"
+        prompt = (
+            f"Personality: {personality}\n\nRespond conversationally to: {text}"
+            if personality
+            else f"Respond conversationally to: {text}"
+        )
         response = await llm.acomplete(prompt)
         return str(response).strip()
     except Exception as e:
         logger.error("chat() failed: %s", e)
-        return f"Hey! 😊 I'm here to help you study. Ask me anything about your documents!"
+        return "Hey! 😊 I'm here to help you study. Ask me anything about your documents!"
 
 
 # ── Tool registry ─────────────────────────────────────────
@@ -158,6 +244,7 @@ _TOOL_REGISTRY = {
     "ask": _tool_ask,
     "quiz": _tool_quiz,
     "summarize": _tool_summarize,
+    "list_docs": _tool_list_docs,
     "chat": _tool_chat,
 }
 
@@ -165,35 +252,45 @@ _TOOL_REGISTRY = {
 # ── BrainPlugin ───────────────────────────────────────────
 class BrainPlugin(Plugin):
     name = "brain"
-    commands = []  # No slash commands — intercepts all free text
+    commands = []
     description = "AI agent that understands your intent and routes to the right tool"
 
     async def handle(self, ctx: BotContext) -> str | None:
-        """Handle free text — send to Gemini agent, process tool calls."""
         message = ctx.message_text.strip()
+        chat_id = ctx.chat_id
 
-        # ── 1. Call Gemini with agent prompt ──────────────
+        # ── 1. Build prompt with conversation history ─────
+        history_block = _build_history_block(chat_id)
+        full_prompt = AGENT_PROMPT
+        if history_block:
+            # Prepend history to user message, not system prompt
+            user_message = f"{history_block}\nCurrent message: {message}"
+        else:
+            user_message = message
+
         logger.info("Brain: sending to Gemini: %s", message[:80])
 
         try:
             response = await gemini_chat(
-                system_prompt=AGENT_PROMPT,
-                user_message=message,
+                system_prompt=full_prompt,
+                user_message=user_message,
                 max_tokens=settings.llm_max_tokens,
                 timeout=settings.llm_timeout,
             )
         except RuntimeError as e:
             logger.error("Gemini call failed: %s", e)
-            # Fallback: try direct Ollama chat
-            return await _tool_chat(
+            reply = await _tool_chat(
                 f"The user said: {message}. Respond conversationally."
             )
+            _remember(chat_id, message, reply)
+            return reply
 
-        logger.info("Brain: Gemini raw response (first 100 chars): %s", response[:100])
+        logger.info("Brain: Gemini response (first 100): %s", response[:100])
 
         # ── 2. Check for TOOL: lines ─────────────────────
         if "TOOL:" not in response:
-            return response  # No tools — return direct
+            _remember(chat_id, message, response)
+            return response
 
         # ── 3. Process TOOL: lines ────────────────────────
         lines = response.split("\n")
@@ -213,9 +310,10 @@ class BrainPlugin(Plugin):
                         logger.warning("Brain: unknown tool '%s'", tool_name)
                         result_lines.append(f"⚠️ Unknown tool: {tool_name}")
                 else:
-                    # Keep the line as-is if we can't parse it
                     result_lines.append(line)
             else:
                 result_lines.append(line)
 
-        return "\n\n".join(result_lines).strip()
+        final_reply = "\n\n".join(result_lines).strip()
+        _remember(chat_id, message, final_reply)
+        return final_reply

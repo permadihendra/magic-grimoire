@@ -2,6 +2,7 @@
 
 Uses the VectorStoreIndex to find relevant document chunks, then
 sends them as context to the Ollama LLM for answer generation.
+Supports difficulty levels and source citations.
 """
 
 import logging
@@ -14,19 +15,22 @@ from llama_index.core.response_synthesizers import get_response_synthesizer
 
 from app.config import settings
 from app.rag.prompts import (
-    QA_PROMPT,
-    QUIZ_PROMPT,
+    get_qa_prompt,
+    get_quiz_prompt,
     SUMMARY_PROMPT,
-    get_study_prompt,
+    DOC_SOURCE_FMT,
 )
 
 logger = logging.getLogger(__name__)
+
+_MAX_SOURCES = 3  # max source citations to show
 
 
 class RAGEngine:
     """High-level RAG query interface.
 
     Wraps LlamaIndex's query engine with study-specific prompts.
+    Supports difficulty levels and returns source citations.
     """
 
     def __init__(self, index: VectorStoreIndex | None = None) -> None:
@@ -36,7 +40,7 @@ class RAGEngine:
     def set_index(self, index: VectorStoreIndex) -> None:
         """Set or update the underlying index."""
         self._index = index
-        self._query_engine = None  # Reset engine, will be rebuilt
+        self._query_engine = None
 
     def _get_query_engine(self) -> RetrieverQueryEngine:
         """Get or create the query engine with current index."""
@@ -62,57 +66,84 @@ class RAGEngine:
         )
         return self._query_engine
 
-    async def query(self, question: str, mode: str = "qa") -> str:
-        """Query the index with a question and return the answer.
+    async def query(
+        self,
+        question: str,
+        mode: str = "qa",
+        difficulty: str = "normal",
+        count: int = 5,
+    ) -> str:
+        """Query the index and return the answer.
 
         Args:
             question: The user's question or prompt.
-            mode: 'qa' (default Q&A), 'quiz' (generate questions), 'summary'
+            mode: 'qa', 'quiz', or 'summary'.
+            difficulty: 'simple', 'normal', or 'advanced'.
+            count: Number of quiz questions (quiz mode only).
 
         Returns:
             Generated response text.
         """
         engine = self._get_query_engine()
 
-        # Craft a study-focused prompt with context
         if mode == "quiz":
-            prompt_template = QUIZ_PROMPT
+            prompt_template = get_quiz_prompt(count, difficulty)
         elif mode == "summary":
             prompt_template = SUMMARY_PROMPT
         else:
-            prompt_template = QA_PROMPT
+            prompt_template = get_qa_prompt(difficulty)
 
-        # Prepend the study prompt to guide the LLM
         full_prompt = f"{prompt_template}\n\nQuestion: {question}"
-        personality = settings.ai_personality.strip()
-        if personality:
-            full_prompt = (
-                f"Personality: {personality}\n\n{full_prompt}"
-            )
 
         response = await engine.aquery(full_prompt)
         return str(response)
 
-    async def query_with_sources(self, question: str) -> dict[str, Any]:
-        """Query and return both answer and source citations.
+    async def query_with_sources(
+        self,
+        question: str,
+        difficulty: str = "normal",
+    ) -> dict[str, Any]:
+        """Query and return BOTH answer and source citations.
 
         Returns:
-            Dict with 'response' (str) and 'sources' (list of metadata).
+            Dict with 'answer' (str) and 'sources' (list of dicts).
         """
         engine = self._get_query_engine()
-        full_prompt = get_study_prompt(question)
+        prompt = get_qa_prompt(difficulty)
+        full_prompt = f"{prompt}\n\nQuestion: {question}"
 
         response = await engine.aquery(full_prompt)
 
+        # Extract unique sources with scores
+        seen_files = set()
         sources = []
         for node in response.source_nodes:
-            sources.append({
-                "filename": node.metadata.get("file_name", "Unknown"),
-                "score": float(node.score) if node.score else 0.0,
-                "text_preview": node.text[:200] if node.text else "",
-            })
+            fname = node.metadata.get("file_name", "Unknown")
+            if fname not in seen_files and len(sources) < _MAX_SOURCES:
+                seen_files.add(fname)
+                sources.append({
+                    "filename": fname,
+                    "score": float(node.score) if node.score else 0.0,
+                })
+
+        # Build answer with source citations appended
+        answer = str(response)
+
+        # Deduplicate sources for the citation block
+        cited = []
+        seen_cited = set()
+        for s in sources:
+            if s["filename"] not in seen_cited:
+                seen_cited.add(s["filename"])
+                cited.append(s)
+
+        if cited:
+            citations = []
+            for s in cited:
+                citations.append(f"📖 *Source:* `{s['filename']}`")
+            answer += "\n\n" + "\n".join(citations)
 
         return {
-            "response": str(response),
+            "answer": answer,
             "sources": sources,
         }
