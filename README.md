@@ -1,17 +1,17 @@
 # Magic Grimoire 📖✨ — RAG Study Agent
 
 > Your personal Telegram study assistant powered by LlamaIndex + Ollama + Gemini.
-> Ingest your PDFs and EPUBs, then query them conversationally — get answers, quizzes,
-> summaries, and exam prep from YOUR documents.
+> Ingest PDFs and EPUBs, then query them conversationally — get answers with source
+> citations, generate practice quizzes, and summarize topics.
 
-**Stack:** Python 3.11+ · FastAPI · LlamaIndex · Ollama (magic-grimoire:3b) · nomic-embed-text · Gemini 3.1 Flash Lite · sqlite3
+**Stack:** Python 3.11+ · FastAPI · LlamaIndex · Ollama (local) · sentence-transformers (CPU fallback) · Gemini 3.1 Flash Lite (agent brain) · sqlite3
 
 ---
 
 ## Quick Start
 
 ```bash
-# 1. Install Ollama + pull models
+# 1. Ollama — pull + create model
 curl -fsSL https://ollama.com/install.sh | sh
 ollama pull qwen2.5:3b
 ollama pull nomic-embed-text
@@ -20,111 +20,172 @@ ollama create magic-grimoire:3b -f Modelfile.3b
 # 2. Clone + install
 git clone <repo> magic-grimoire
 cd magic-grimoire
-cp .env.example .env
-# Edit .env: set TELEGRAM_TOKEN and GEMINI_API_KEY
-uv sync
+cp .env.example .env        # Set TELEGRAM_TOKEN + GEMINI_API_KEY
+uv sync                     # or: uv sync --extra epub --extra dev
 
-# 3. Drop your study PDFs/EPUBs into docs/
+# 3. Drop your PDFs/EPUBs into docs/
 cp my-book.pdf app/docs/
 
-# 4. Launch!
-./app/start-bot.sh
+# 4. Launch (always use this — manages cloudflared tunnel)
+bash app/start-bot.sh
 ```
+
+> ⚠️ **Always use `bash app/start-bot.sh`** — never `uvicorn` directly.
+
+---
 
 ## Commands
 
-| Command | Description |
+| Command | What it does |
 |---|---|
-| `/ask <question>` | Query your documents with AI |
-| `/quiz <topic>` | Generate practice questions |
-| `/index` | Index all documents in `app/docs/` |
-| `/files` | List indexed files with Gemini-cleaned names |
-| `/delete <id>` | Delete a file by its ID |
-| `/status` | Show index statistics |
-| `/help` | Show help |
-| `/ping` | Health check |
+| `/ask <question>` | Query your documents — gets answer with source citations + next steps |
+| `/quiz <topic>` | Generate practice questions with answers + sources |
+| `/summarize <topic>` | Get a topic summary from your documents |
+| `/docs` | See your library: file sizes, word counts, parse methods, probe status |
+| `/index` | Pre-verify → parse → embed → probe: full index rebuild with per-file report |
+| `/files` | All files on disk: indexed status, pending files, display names |
+| `/delete <id>` | Delete a file — shows impact (size/words/chunks) before confirming |
+| `/status` | Bot health + index statistics |
+| `/help` | Command list |
 
-**Free text:** Just type a question — Gemini decides the best tool.
-No need to remember slash commands for most queries.
+**Free text:** Type any question — Gemini routes it automatically. No need to remember `/ask`.
+
+---
 
 ## Features
 
 ### 📚 Document Ingestion
-- PDF (via LiteParse with OCR) and EPUB (via SimpleDirectoryReader)
-- Auto-clean filenames via Gemini at index time
-- Persistent vector index (LlamaIndex) for fast retrieval
+- **Multi-method parsing:** ebooklib → LiteParse (PDF+OCR) → Calibre CLI → SimpleDirectoryReader
+- **Pre-index verify:** test-parses every file before building, shows word count or error
+- **Probe verification:** runs a test retrieval after build to confirm index is usable
+- **Per-file report:** each file shows parse method, word count, chunk count, probe status
+- **Gemini filename cleaning:** converts "Bhagavad Gita-Penguin Books 2005.epub" → "The Bhagavad Gita"
 
-### 🧠 Agentic Brain
-- Gemini routes every message — intent detection in 50ms
-- Automatic tool selection: ask, quiz, summarize, list_docs, chat
-- Feedback learning: say "wrong source" and it penalizes that document
-- Knowledge cache: 0.1s answers for repeated questions
+### 🧠 Agentic Brain (Gemini)
+- Routes every free-text message to the right tool in ~50ms
+- Detects intent, selects tools, chains actions
+- Conversation memory (last 5 exchanges per chat)
+- Proactive suggestions: "Would you like a quiz or deeper explanation?"
+- Detects when answer came from training data (no tool used) → shows footer
 
-### 🛡️ Stability on 8 GB GPU
-- `magic-grimoire:3b` optimized model (1.9 GB weights, 4096 ctx, temp 0.0)
-- OllamaGuard prevents concurrent operations (no VRAM crashes)
-- Fresh sqlite3 per operation — no corruption from GPU load
-- Auto-recovery from crashes
+### 🔍 RAG Engine
+- **Document-aware retrieval:** mentions a book name → boosts that book's chunks 2x
+- **Feedback learning:** "wrong source" → penalizes that document for this session
+- **Knowledge cache:** repeated questions answered in ~0.1s (no LLM call)
+- **7-layer guardrails:** 0 chunks / token budget / Ollama busy → early returns, no crash
+- **Fallback embedding:** Ollama embed crashes → auto-switches to CPU sentence-transformers
+
+### 🛡️ Stable on 8 GB GPU (RTX 3050)
+
+| Component | Model | VRAM |
+|---|---|---|
+| LLM | `magic-grimoire:3b` (qwen2.5:3b, 1024 ctx, temp 0.0) | 1.9 GB |
+| Embeddings | `nomic-embed-text` (batch=3) | 0.3 GB |
+| KV cache | 1024 context window | ~1.2 GB |
+| **Total** | | **~3.4 GB** (4.6 GB headroom) |
+| Fallback | `all-MiniLM-L6-v2` (CPU, sentence-transformers) | 0 GB |
+
+**Guard layers:** VRAM pre-check → semaphore (1 concurrent op) → 30s synthesis timeout → fallback prompt → CPU embed fallback
 
 ### 📊 Progress Visibility
-- Phase-aware watcher reports at t=0.5s, 30s, 60s+
-- "Found 3 passages from World Economy. Generating answer..."
-- Escalating messages if query takes long
-- "Primary source / Also" citation labels
+Every command shows structured output:
+```
+📚 Your Library (2 documents)
+
+[1] 📄 **The Bhagavad Gita**
+   └─ 📊 6.7 MB · 186 chunks · 46,677 words
+   └─ ✅ ebooklib (EPUB) · probe verified · indexed 28 May 2026
+
+[2] 📄 **World Economy Summary**
+   └─ 📊 1.2 MB · 45 chunks · 8,340 words
+   └─ ⚠️ SimpleDirectoryReader · probe unknown · indexed 27 May 2026
+
+_Total: 2 documents · ~55,000 words across all materials_
+```
+
+---
 
 ## Architecture
 
 ```
-Telegram → cloudflared → FastAPI → Gemini agent → Knowledge Cache (fast) → RAG Engine → answer
+Telegram → cloudflared → FastAPI → Gemini agent → tools
+                                           │
+        ┌──────────────┬───────────────────┴────────────────┐
+        ↓              ↓                    ↓                   ↓
+    ask_query()    generate_quiz()     list_docs()         chat()
+        ↓              ↓                    ↓                   ↓
+  engine.query_   engine.query       brain/handler       Ollama direct
+  with_sources    (mode=quiz)         _tool_list_docs_v2
+        ↓
+  ┌─────┴─────┐
+  ↓  L1-L7    ↓  TreeSummarize / fallback → answer + sources + stats
+  guardrails
 ```
 
-All inference runs locally via Ollama. Gemini handles the lightweight intent routing.
+All inference runs locally via Ollama. Gemini handles lightweight intent routing only.
+
+---
 
 ## Project Structure
 
 ```
-magic-grimoire/
-├── app/
-│   ├── main.py              # FastAPI app
-│   ├── config.py            # Settings
-│   ├── database.py          # sqlite3 (fresh per op, no corruption)
-│   ├── bot/                 # Telegram webhook + dispatcher
-│   ├── plugins/
-│   │   ├── brain/           # Gemini agent + tool router
-│   │   ├── study/           # RAG backend
-│   │   └── system/          # /start, /help, /ping
-│   ├── rag/
-│   │   ├── engine.py        # Query engine (group-sort, filtering)
-│   │   ├── indexer.py       # Document ingestion (Gemini clean names)
-│   │   ├── guard.py         # OllamaGuard (semaphore, health check)
-│   │   ├── feedback.py      # FeedbackLearner (penalty/boost)
-│   │   └── knowledge_cache.py # Q&A cache with cosine search
-│   ├── ui/
-│   │   └── progress.py      # ProgressWatcher (phase-aware)
-│   └── llm/
-│       └── gemini.py        # Gemini API client
-├── data/                    # sqlite3 DB + LlamaIndex vector store
-├── docs/                    # Your study documents go here
-├── Modelfile.3b             # Optimized qwen2.5:3b config
-├── start-bot.sh             # One-command launcher
-└── pyproject.toml           # Python deps (uv-managed)
+app/
+├── main.py              # FastAPI + lifespan (db init, plugin loading, warm-up)
+├── config.py            # pydantic-settings (all secrets + tuning params)
+├── database.py          # sqlite3 fresh per op — WAL mode, 5 tables
+│
+├── bot/                 # Telegram webhook + dispatcher + middleware
+├── plugins/
+│   ├── brain/handler.py # Gemini agent: tool router, system prompt, memory
+│   ├── study/handler.py # RAG backend: ask_query, generate_quiz, index, docs
+│   └── system/handler.py # /start, /help, /ping, /status
+│
+├── rag/
+│   ├── models.py        # Ollama LLM + FallbackEmbedding config
+│   ├── indexer.py       # Multi-method parser + vector index builder
+│   ├── engine.py        # query_with_sources() with 7 guardrails
+│   ├── guard.py         # OllamaGuard: VRAM check + semaphore + OOM recovery
+│   ├── embeddings.py   # FallbackEmbedding: Ollama → CPU all-MiniLM-L6-v2
+│   ├── feedback.py      # FeedbackLearner: per-chat document scoring
+│   ├── knowledge_cache.py # Q&A cache with cosine search
+│   └── prompts.py       # QA / Quiz / Summary prompt templates
+│
+├── ui/
+│   ├── progress.py      # ProgressState + ProgressWatcher (phase-aware escalation)
+│   └── helpers.py       # _build_file_card, _build_files_card, _fmt_timestamp
+│
+└── llm/
+    └── gemini.py        # Gemini API client
 ```
 
-## Model
-
-| Component | Model | VRAM |
-|---|---|---|
-| LLM | `magic-grimoire:3b` (optimized from qwen2.5:3b) | 1.9 GB |
-| Embeddings | `nomic-embed-text` | 0.3 GB |
-| Agent brain | Gemini 3.1 Flash Lite (cloud, free tier) | 0 |
-| **Total** | | **~3.2 GB** (4.8 GB headroom on 8 GB card) |
+---
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| Bot doesn't reply | Re-run `./app/start-bot.sh` (tunnel expired) |
-| "database disk image is malformed" | Must! Delete `data/magic-grimoire.db` and restart |
+| Bot doesn't reply | Re-run `bash app/start-bot.sh` (cloudflared tunnel expired) |
 | "Model not found" | `ollama create magic-grimoire:3b -f Modelfile.3b` |
-| Index rebuild fails | Check Ollama is running: `ollama list` |
-| Wrong source cited | Say "that's from the wrong book" — Gemini penalizes it |
+| Index rebuild fails | `ollama serve && ollama list` — check models are loaded |
+| "Ollama embed crashed" | Bot auto-switches to CPU fallback — retry `/index` |
+| "database disk image is malformed" | Delete `data/magic-grimoire.db` and restart |
+| PC crashed during `/index` | CPU fallback (sentence-transformers) should prevent this |
+| Wrong source cited | Say "that's from the wrong book" → feedback penalizes it |
+
+---
+
+## Development
+
+```bash
+uv run ruff check .             # Lint
+uv run ruff check --fix .       # Auto-fix
+uv sync --extra epub            # EPUB support
+uv sync --extra dev             # Dev deps (pytest, mypy)
+
+# Register/remove webhook
+uv run python -m app.bot.setup_webhook
+uv run python -m app.bot.setup_webhook --delete
+```
+
+For detailed code reference, see **[AGENTS.md](AGENTS.md)**.
+For development plans, see **PLAN_*.md** files.
