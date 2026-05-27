@@ -282,34 +282,31 @@ class StudyPlugin(Plugin):
 
         msg_id = await _send(f"📚 *Indexing {len(files)} documents...*")
 
+        # Progress watcher for long indexing
+        from app.ui.progress import ProgressState, ProgressWatcher
+        progress = ProgressState()
+        progress.start_phase("index_parse")
+        progress.files_total = len(files)
+
+        watcher = ProgressWatcher(ctx.chat_id, msg_id, progress, interval=30)
+        watcher.start()
+
         try:
             t0 = time.time()
 
-            # Phase 1: Parsing + indexing (the heavy work)
+            # Phase 1: Parsing + embedding
             if msg_id:
                 await _edit(msg_id, "📖 Parsing and indexing documents...")
 
-            # Start timer for long operations
-            import asyncio
-            timer_task = None
-            if msg_id:
-                async def _index_timer():
-                    elapsed = 0
-                    try:
-                        while True:
-                            await asyncio.sleep(30)
-                            elapsed += 30
-                            await _edit(msg_id, f"⏳ Still indexing... ({elapsed}s elapsed)")
-                    except asyncio.CancelledError:
-                        pass
-                timer_task = asyncio.create_task(_index_timer())
+            # Start background watcher (will auto-report)
+            progress.start_phase("index_embed")
 
             try:
                 index = await _doc_indexer.rebuild_index()
                 _rag_engine.set_index(index)
             finally:
-                if timer_task:
-                    timer_task.cancel()
+                progress.complete = True
+                watcher.stop()
 
             elapsed = time.time() - t0
 

@@ -474,11 +474,19 @@ class BrainPlugin(Plugin):
             thinking_id = thinking_msg.get("message_id") if thinking_msg else None
 
             # For ask: Phase 1 — retrieve first (fast), show results
+            # Create shared state for ProgressWatcher
+            from app.ui.progress import ProgressState, ProgressWatcher
+            progress = ProgressState()
+            progress.query_text = message
+
             if "ask" in tool_names and thinking_id:
                 try:
                     ask_params = next((p for n, p in tool_tasks if n == "ask"), {})
                     query = ask_params.get("query", message)
                     document = ask_params.get("document")
+
+                    progress.start_phase("retrieve")
+                    progress.document_name = document
 
                     passages = await _tool_retrieve(query, document=document, chat_id=chat_id)
 
@@ -492,6 +500,9 @@ class BrainPlugin(Plugin):
                                 seen.add(sn)
                                 short_names.append(f"{sn} ({p['score']:.2f})")
 
+                        progress.passages_found = len(passages)
+                        progress.passages_docs = [p["filename"] for p in passages[:3]]
+
                         lines = ["🔍 *Retrieved passages:*\n"]
                         for s in short_names:
                             lines.append(f"\u2022 {s}")
@@ -501,7 +512,12 @@ class BrainPlugin(Plugin):
                 except Exception as e:
                     logger.debug("Retrieve preview failed: %s", e)
 
-            # Execute tools with error handling + timer
+            # Start progress watcher for long operations
+            progress.start_phase("generate")
+            watcher = ProgressWatcher(chat_id, thinking_id, progress, interval=60)
+            watcher.start()
+
+            # Execute tools with error handling
             result_lines = []
             for t_name, t_params in tool_tasks:
                 # Inject chat_id for feedback learning
@@ -511,14 +527,6 @@ class BrainPlugin(Plugin):
                 tool_fn = _TOOL_REGISTRY.get(t_name)
                 if tool_fn:
                     logger.info("Brain: executing tool '%s' with %s", t_name, t_params)
-
-                    timer = None
-                    if "ask" in tool_names or "quiz" in tool_names:
-                        import asyncio
-                        timer = asyncio.create_task(
-                            _progress_timer(chat_id, thinking_id,
-                                            label="generating", interval=60)
-                        )
 
                     try:
                         result = await tool_fn(**t_params)
@@ -541,11 +549,12 @@ class BrainPlugin(Plugin):
                             await _edit_message(chat_id, thinking_id, error_msg)
                         _remember(chat_id, message, error_msg)
                         return None
-                    finally:
-                        if timer:
-                            timer.cancel()
                 else:
                     result_lines.append(f"⚠️ Unknown tool: {t_name}")
+
+            # Stop watcher, mark complete
+            progress.complete = True
+            watcher.stop()
 
             conv_text = "\n".join(conversational_parts).strip()
             tool_text = "\n\n".join(result_lines).strip()

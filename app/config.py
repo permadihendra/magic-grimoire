@@ -23,7 +23,7 @@ class Settings(BaseSettings):
 
     # ── Ollama (RAG Engine) ───────────────────────────────
     ollama_base_url: str = "http://localhost:11434"
-    ollama_llm_model: str = "qwen2.5:7b"
+    ollama_llm_model: str = "magic-grimoire:v1"  # was "qwen2.5:7b" — optimized Modelfile
     ollama_embed_model: str = "nomic-embed-text"
     ollama_timeout: float = 300.0
 

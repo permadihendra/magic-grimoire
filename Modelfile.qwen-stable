@@ -1,0 +1,55 @@
+# Magic Grimoire — Optimized qwen2.5:7b for 8 GB VRAM (RTX 3050)
+#
+# This Modelfile creates a custom Ollama model tuned for:
+# - Stable operation on 8 GB VRAM (prevents OOM crashes)
+# - Fast, concise RAG answers (not essays)
+# - Study Q&A workflow (factual, source-citing)
+#
+# VRAM: 4.7 GB (Q4_K_M) + 0.7 GB (KV, 4K) + 0.3 GB (embeddings) + 0.5 GB (overhead)
+#     = ~6.2 GB — 1.8 GB headroom on 8 GB card
+
+FROM qwen2.5:7b
+
+# ── Memory Optimization ──────────────────────────────
+# Context limited to 4096: KV cache ~0.7 GB (was ~1.5 GB for 8K)
+# Saves 0.8 GB VRAM — key stability improvement
+PARAMETER num_ctx 4096
+
+# ── GPU ─────────────────────────────────────────────
+# Force all 28 layers to GPU (prevents CPU fallback crashes)
+PARAMETER num_gpu 99
+PARAMETER num_batch 512
+
+# ── Generation ──────────────────────────────────────
+# Study answers should be concise, not 2000-token essays
+PARAMETER num_predict 1024
+
+# Temperature 0.0 = deterministic output
+# We don't need creativity — the facts come from the documents.
+# Same question always gets the same answer. No hallucination wiggle room.
+# 
+# NOTE: Also enforced in app/rag/models.py (defense in depth —
+# code sends this in every API request, overriding Modelfile defaults).
+# Both must stay at 0.0.
+PARAMETER temperature 0.0
+
+# With temp 0.0, top_p and top_k are irrelevant (only one token path)
+# But set them for clarity:
+PARAMETER top_p 1.0
+PARAMETER top_k 1
+
+# Light repetition penalty — prevents loop even with deterministic output
+PARAMETER repeat_penalty 1.05
+
+# Stop tokens for clean output
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "<|im_start|>"
+
+# ── System Prompt ───────────────────────────────────
+SYSTEM """You are a precise study assistant. When answering from documents:
+1. Base answers ONLY on the provided context
+2. Be concise — 3-5 paragraphs maximum
+3. Use simple, clear language
+4. Cite specific passages when possible
+5. If context does not contain the answer, say "The provided documents do not cover this topic" honestly
+6. Do not hallucinate or invent information"""
