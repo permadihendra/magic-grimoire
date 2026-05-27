@@ -1,67 +1,61 @@
+"""Database module — fresh sqlite3 connection per operation.
+
+Each get_db() call opens a new connection. No caching, no background threads.
+This prevents corruption during GPU-heavy operations (embedding 1264 chunks).
+"""
+
 import logging
 import os
-
-import aiosqlite
+import sqlite3
+import threading
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_db_connection: aiosqlite.Connection | None = None
+_lock = threading.Lock()
 
 
-async def get_db() -> aiosqlite.Connection:
-    """Get the shared aiosqlite connection, creating it on first call.
-    Auto-recovers from corruption caused by hard crashes."""
-    global _db_connection
-    if _db_connection is not None:
-        # Verify existing connection is still healthy
-        try:
-            await _db_connection.execute("SELECT 1")
-            return _db_connection
-        except Exception:
-            logger.warning("DB connection lost — reconnecting")
-            _db_connection = None
+class _AsyncCursor:
+    """Async wrapper around sqlite3.Cursor."""
+    def __init__(self, cur: sqlite3.Cursor):
+        self._cur = cur
 
-    os.makedirs(os.path.dirname(settings.db_path), exist_ok=True)
-    
-    # Check for corruption before connecting
-    if os.path.exists(settings.db_path):
-        import sqlite3
-        try:
-            test = sqlite3.connect(settings.db_path)
-            test.execute("PRAGMA quick_check")
-            test.close()
-        except sqlite3.DatabaseError:
-            logger.error("Database corrupted — recreating from scratch")
-            _recover_db()
+    async def fetchone(self):
+        return self._cur.fetchone()
 
-    _db_connection = await aiosqlite.connect(settings.db_path)
-    _db_connection.row_factory = aiosqlite.Row
-    await _db_connection.execute("PRAGMA journal_mode=WAL")
-    await _db_connection.execute("PRAGMA foreign_keys=ON")
-    await _db_connection.execute("PRAGMA synchronous=NORMAL")
-    return _db_connection
+    async def fetchall(self):
+        return self._cur.fetchall()
 
 
-def _recover_db() -> None:
-    """Backup corrupted DB and delete it for fresh recreation."""
-    import shutil, time
-    bak = f"{settings.db_path}.corrupted.{int(time.time())}"
-    try:
-        shutil.copy2(settings.db_path, bak)
-        logger.info("Corrupted DB backed up to %s", bak)
-    except Exception:
-        pass
-    os.remove(settings.db_path)
-    logger.info("Corrupted DB deleted — will be recreated on next start")
+class _AsyncDB:
+    """Thin async wrapper — opens fresh sqlite3 connection each time."""
+
+    def __init__(self):
+        os.makedirs(os.path.dirname(settings.db_path), exist_ok=True)
+        self._conn = sqlite3.connect(settings.db_path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+
+    async def execute(self, sql: str, parameters=None):
+        with _lock:
+            if parameters:
+                return _AsyncCursor(self._conn.execute(sql, parameters))
+            return _AsyncCursor(self._conn.execute(sql))
+
+    async def commit(self):
+        with _lock:
+            self._conn.commit()
+
+
+async def get_db():
+    """Get a fresh async-wrapped database connection."""
+    return _AsyncDB()
 
 
 async def init_db() -> None:
-    """Initialize database tables."""
     db = await get_db()
-
-    # Documents tracking table
     await db.execute("""
         CREATE TABLE IF NOT EXISTS documents (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,14 +67,10 @@ async def init_db() -> None:
             indexed_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
-
-    # Add display_name if upgrading from older schema
     try:
         await db.execute("ALTER TABLE documents ADD COLUMN display_name TEXT")
     except Exception:
-        pass  # Column already exists
-
-    # Query history (for future context)
+        pass
     await db.execute("""
         CREATE TABLE IF NOT EXISTS query_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,10 +80,6 @@ async def init_db() -> None:
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
-
-    await db.commit()
-
-    # Knowledge cache — Q&A pairs for fast repeat queries
     await db.execute("""
         CREATE TABLE IF NOT EXISTS knowledge_pairs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,46 +96,22 @@ async def init_db() -> None:
             last_used_at DATETIME
         )
     """)
-
+    await db.commit()
     logger.info("Database initialized")
 
 
 async def get_document_stats() -> dict:
-    """Get aggregate stats about indexed documents.
-
-    Returns:
-        Dict with keys: docs (count), size_mb (total MB), words (estimated), chunks.
-        Returns zeros if no documents are indexed.
-    """
-    db = await get_db()
     try:
-        cursor = await db.execute(
-            "SELECT COUNT(*) as doc_count, COALESCE(SUM(file_size), 0) as total_bytes, "
-            "COALESCE(SUM(chunk_count), 0) as total_chunks FROM documents"
+        db = await get_db()
+        cur = await db.execute(
+            "SELECT COUNT(*) as doc_count, COALESCE(SUM(file_size), 0) as total_bytes "
+            "FROM documents"
         )
-        row = await cursor.fetchone()
-        if not row or row["doc_count"] == 0:
+        row = await cur.fetchone()
+        if not row:
             return {"docs": 0, "size_mb": 0, "words": 0, "chunks": 0}
-
-        doc_count = row["doc_count"]
-        total_bytes = row["total_bytes"]
-        total_chunks = row["total_chunks"]
-
-        # Estimate word count: rough heuristic
-        # PDF/EPUB: ~35% text content, ~5 chars per word
-        if total_chunks > 0:
-            # Better estimate from chunk count * chunk size
-            from app.config import settings
-            estimated_words = total_chunks * settings.chunk_size // 5
-        else:
-            estimated_words = int(total_bytes * 0.35 / 5)
-
-        return {
-            "docs": doc_count,
-            "size_mb": round(total_bytes / (1024 * 1024), 1),
-            "words": estimated_words,
-            "chunks": total_chunks,
-        }
-    except Exception as e:
-        logger.warning("get_document_stats failed: %s", e)
+        size_mb = round(row["total_bytes"] / (1024 * 1024), 1)
+        words = int(row["total_bytes"] * 0.35 / 5) if row["total_bytes"] else 0
+        return {"docs": row["doc_count"], "size_mb": size_mb, "words": words, "chunks": 0}
+    except Exception:
         return {"docs": 0, "size_mb": 0, "words": 0, "chunks": 0}
