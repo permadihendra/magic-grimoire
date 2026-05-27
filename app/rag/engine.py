@@ -470,16 +470,21 @@ class RAGEngine:
                         citations.append(f"{label} {short}")
             answer += "\n\n" + "\n".join(citations)
 
+        # --- Phase 4: Next-step suggestion (after answer, before citations) ---
+        answer += (
+            "\n\n💡 *Next steps:* Would you like a follow-up question, a `quiz` on this topic, "
+            "or a `summary` of the key points? Just ask!"
+        )
+
         # --- Diagnostics footer: chunk count + token size ---
         chunk_texts = [n.text for n in nodes if n.text]
         total_tokens = sum(len(t.split()) * 1.3 for t in chunk_texts)
-        diag = [
-            "",
-            f"📊 *Retrieval:* {len(chunk_texts)} chunks | "
+        diag = (
+            f"\n\n📊 *Retrieval:* {len(chunk_texts)} chunks | "
             f"~{int(total_tokens)} tokens | k={settings.retrieval_top_k} | "
             f"ctx=2048"
-        ]
-        answer += "\n" + "\n".join(diag)
+        )
+        answer += diag
 
         if low_confidence and cited:
             answer += (
