@@ -312,8 +312,10 @@ class DocumentIndexer:
         return index
 
     async def _sync_documents(self, docs_dir: str, files: list[str]) -> None:
-        """Update the documents table to reflect current files."""
+        """Update the documents table. Checkpoint WAL first to prevent corruption."""
         db = await get_db()
+        # Force WAL checkpoint before modifying — prevents corruption from GPU load
+        await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         await db.execute("DELETE FROM documents")
         for fname in files:
             fpath = os.path.join(docs_dir, fname)
