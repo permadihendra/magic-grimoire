@@ -111,38 +111,6 @@ async def init_db() -> None:
         )
     """)
 
-    # FTS5 full-text search on document names
-    await db.execute("""
-        CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
-            filename,
-            display_name,
-            content=documents,
-            content_rowid=id
-        )
-    """)
-
-    # Triggers to keep FTS5 in sync
-    await db.execute("""
-        CREATE TRIGGER IF NOT EXISTS docs_fts_ai AFTER INSERT ON documents BEGIN
-            INSERT INTO documents_fts(rowid, filename, display_name)
-            VALUES (new.id, new.filename, new.display_name);
-        END
-    """)
-    await db.execute("""
-        CREATE TRIGGER IF NOT EXISTS docs_fts_ad AFTER DELETE ON documents BEGIN
-            INSERT INTO documents_fts(documents_fts, rowid, filename, display_name)
-            VALUES ('delete', old.id, old.filename, old.display_name);
-        END
-    """)
-    await db.execute("""
-        CREATE TRIGGER IF NOT EXISTS docs_fts_au AFTER UPDATE ON documents BEGIN
-            INSERT INTO documents_fts(documents_fts, rowid, filename, display_name)
-            VALUES ('delete', old.id, old.filename, old.display_name);
-            INSERT INTO documents_fts(rowid, filename, display_name)
-            VALUES (new.id, new.filename, new.display_name);
-        END
-    """)
-
     logger.info("Database initialized")
 
 
