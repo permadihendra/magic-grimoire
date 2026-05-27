@@ -11,6 +11,7 @@ Supports:
 import asyncio
 import logging
 import re
+import time
 from typing import Any
 
 from llama_index.core import VectorStoreIndex
@@ -441,6 +442,10 @@ class RAGEngine:
                 )
             except Exception as e:
                 logger.debug("Cache store failed: %s", e)
+
+        _total_ms = (time.time()-_t0)*1000
+        logger.info("[%s] >>> q_with_sources DONE %d chars (%.0fms total)",
+                    _qid, len(answer), _total_ms)
 
         return {
             "answer": answer,

@@ -470,12 +470,21 @@ async def ask_query(query: str, difficulty: str = "normal", document: str | None
     Used by BrainPlugin's ask() tool.
     """
     global _rag_engine, _doc_indexer
+    import time as _time_module
+
+    _aqid = f"aq_{int(_time_module.time()*1000)%100000:05d}"
+    logger.info("[%s] >>> ask_query START q='%s' diff=%s doc=%s", _aqid, query[:60], difficulty, document)
+    _aq_t0 = _time_module.time()
 
     if _rag_engine is None or _doc_indexer is None:
+        logger.error("[%s] RAG engine not initialized!", _aqid)
         return "\u26a0\ufe0f RAG engine not initialized. Restart the bot."
 
     try:
+        logger.info("[%s]  calling ensure_index()...", _aqid)
+        _idx_t0 = _time_module.time()
         index = await _doc_indexer.ensure_index()
+        logger.info("[%s]  index loaded in %.0fms", _aqid, (_time_module.time()-_idx_t0)*1000)
         _rag_engine.set_index(index)
 
         from app.database import get_db
@@ -483,13 +492,17 @@ async def ask_query(query: str, difficulty: str = "normal", document: str | None
         cursor = await db.execute("SELECT COUNT(*) as cnt FROM documents")
         row = await cursor.fetchone()
         if not row or row["cnt"] == 0:
+            logger.info("[%s]  no documents indexed", _aqid)
             return "📭 No documents indexed yet! Run `/index` first."
 
-        logger.info("ask_query: %s (difficulty=%s, document=%s)", query[:100], difficulty, document)
+        logger.info("[%s]  calling rag_engine.query_with_sources()...", _aqid)
+        _qws_t0 = _time_module.time()
         result = await _rag_engine.query_with_sources(query, difficulty=difficulty, document=document, chat_id=chat_id)
+        logger.info("[%s]  q_with_sources done in %.0fms", _aqid, (_time_module.time()-_qws_t0)*1000)
+        logger.info("[%s] >>> ask_query DONE (%.0fms total)", _aqid, (_time_module.time()-_aq_t0)*1000)
         return result["answer"]
     except Exception as e:
-        logger.error("ask_query failed: %s", e, exc_info=True)
+        logger.error("[%s] >>> ask_query CRASHED: %s", _aqid, e, exc_info=True)
         return f"\u26a0\ufe0f Query failed: {e}"
 
 
