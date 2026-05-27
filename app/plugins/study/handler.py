@@ -227,16 +227,14 @@ class StudyPlugin(Plugin):
         return await _tool_list_docs()
 
     async def _handle_index(self, ctx: BotContext) -> str:
-        """Handle /index — re-index all documents with progress."""
+        """Handle /index — verify, parse, embed, and report with full diagnostics."""
         global _rag_engine, _doc_indexer
 
         docs_dir = settings.docs_dir
         if not os.path.isdir(docs_dir):
             os.makedirs(docs_dir, exist_ok=True)
-            return (
-                f"📁 Created `{docs_dir}/` — it's empty!\n\n"
-                "Drop your PDFs or text files there and run `/index` again."
-            )
+            return (f"📁 Created `{docs_dir}/` — it's empty!\n\n"
+                    "Drop your PDFs or text files there and run `/index` again.")
 
         files = [
             f for f in os.listdir(docs_dir)
@@ -245,14 +243,10 @@ class StudyPlugin(Plugin):
         ]
 
         if not files:
-            return (
-                f"📭 No files found in `{docs_dir}/`.\n\n"
-                "Place your study documents there first."
-            )
+            return (f"📭 No files found in `{docs_dir}/`.\n\n"
+                    "Place your study documents there first.")
 
-        logger.info("Rebuilding index with %d files...", len(files))
-
-        # Send initial progress message
+        # ── HTTP helpers ──────────────────────────────────
         import httpx
         token = settings.telegram_token
         chat_id = ctx.chat_id
@@ -260,7 +254,6 @@ class StudyPlugin(Plugin):
         edit_url = f"https://api.telegram.org/bot{token}/editMessageText"
 
         async def _send(text: str) -> int | None:
-            """Send a new message, return message_id."""
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     r = await client.post(send_url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
@@ -271,78 +264,143 @@ class StudyPlugin(Plugin):
             return None
 
         async def _edit(msg_id: int, text: str):
-            """Edit an existing message."""
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     r = await client.post(edit_url, json={"chat_id": chat_id, "message_id": msg_id, "text": text, "parse_mode": "Markdown"})
-                    if r.status_code == 400:
+                    if r.status_code >= 400:
                         await client.post(edit_url, json={"chat_id": chat_id, "message_id": msg_id, "text": text})
             except Exception:
                 pass
 
-        msg_id = await _send(f"📚 *Indexing {len(files)} documents...*")
+        # ── Phase 1: Pre-index check — test-parse each file ─
+        msg_id = await _send(f"🔍 *Pre-index check: {len(files)} file(s)...*")
 
-        # Progress watcher for long indexing
+        pre_lines = [f"🔍 *Pre-index check: {len(files)} file(s)*\n\n"]
+        success_count = 0
+
+        for i, fname in enumerate(files, 1):
+            fpath = os.path.join(docs_dir, fname)
+            try:
+                size_mb = os.path.getsize(fpath) / (1024 * 1024)
+            except Exception:
+                size_mb = 0
+
+            result = await _doc_indexer.pre_index_check_single(fpath, fname)
+            if result.success:
+                success_count += 1
+                pre_lines.append(
+                    f"📄 [{i}/{len(files)}] `{fname}` ({size_mb:.1f} MB)\n"
+                    f"   └─ {result.method} ✅ — {result.word_count:,} words\n"
+                )
+            else:
+                pre_lines.append(
+                    f"📄 [{i}/{len(files)}] `{fname}` ({size_mb:.1f} MB)\n"
+                    f"   └─ ❌ {result.error or 'parsing failed'}\n"
+                )
+
+        pre_text = "\n".join(pre_lines)
+
+        # Block if ALL files failed parsing
+        if success_count == 0:
+            logger.error("All %d files failed pre-index check", len(files))
+            block_msg = (
+                "❌ *No documents could be parsed.*\n\n"
+                "All files failed during pre-index check.\n\n"
+                "Suggestions:\n"
+                "1. `uv sync --extra epub` — install EPUB support\n"
+                "2. `uv sync --extra liteparse` — install PDF/OCR support\n"
+                "3. Convert EPUB to PDF and re-upload\n"
+                "4. Try a plain .txt file\n\n"
+                "⚠️ Your old index is preserved. Bot is still functional."
+            )
+            if msg_id:
+                await _edit(msg_id, pre_text + "\n\n" + block_msg)
+            return None
+
+        await _edit(msg_id, pre_text + "\n✅ Ready. Building index...")
+
+        # ── Phase 2: Build index with progress ─────────────
         from app.ui.progress import ProgressState, ProgressWatcher
         from app.rag.knowledge_cache import invalidate_cache
-        await invalidate_cache()  # Clear stale cached answers
+        await invalidate_cache()
+
         progress = ProgressState()
-        progress.start_phase("index_parse")
+        progress.start_phase("index_embed")
         progress.files_total = len(files)
 
         watcher = ProgressWatcher(ctx.chat_id, msg_id, progress, interval=30)
         watcher.start()
 
+        t0 = time.time()
+
         try:
-            t0 = time.time()
+            stats = {}
 
-            # Phase 1: Parsing + embedding
-            if msg_id:
-                await _edit(msg_id, "📖 Parsing and indexing documents...")
+            def report_chunks(chunk_count: int):
+                progress.chunks_embedded = chunk_count
 
-            # Start background watcher (will auto-report)
-            progress.start_phase("index_embed")
+            index = await _doc_indexer.rebuild_index(report_fn=report_chunks)
+            _rag_engine.set_index(index)
+            stats = _doc_indexer.last_build_stats or {}
 
-            try:
-                index = await _doc_indexer.rebuild_index()
-                _rag_engine.set_index(index)
-            finally:
-                progress.complete = True
-                watcher.stop()
+        finally:
+            progress.complete = True
+            watcher.stop()
 
-            elapsed = time.time() - t0
+        elapsed = time.time() - t0
 
-            # Get stats
-            db = await get_db()
-            cursor = await db.execute("SELECT SUM(chunk_count) as total FROM documents")
-            row = await cursor.fetchone()
-            total_chunks = row["total"] if row and row["total"] else "?"
+        # ── Phase 3: Post-build report ─────────────────────
+        probe_ok = stats.get("probe_ok", False)
+        docs_ok = stats.get("docs", 0)
+        chunks = stats.get("chunks", 0)
+        words = stats.get("words", 0)
+        failed = stats.get("failed", 0)
+        parse_results = _doc_indexer.parse_results
+        parse_errors = _doc_indexer.parse_errors
 
-            file_list = "\n".join(f"  📄 `{f}`" for f in files)
-            result = (
-                f"✅ *Index rebuilt!* ({elapsed:.0f}s)\n\n"
-                f"Indexed `{len(files)}` documents with ~{total_chunks} chunks:\n"
-                f"{file_list}\n\n"
-                f"Now try `/ask` or `/quiz` to study!"
-            )
+        # Per-file lines
+        file_lines = []
+        for fname in files:
+            result = next((r for r in parse_results if r.doc and r.doc.metadata.get("file_name") == fname), None)
+            error = next((e for e in parse_errors if e[0] == fname), None)
+            if result and result.success:
+                # Count chunks for this file in the index
+                file_chunks = 0
+                try:
+                    file_chunks = len([n for n in index.docstore.docs.values()
+                                       if n.metadata.get("file_name") == fname])
+                except Exception:
+                    pass
+                file_lines.append(
+                    f"📄 `{fname}` — ✅ {result.word_count:,} words | {file_chunks} chunks"
+                )
+            elif error:
+                file_lines.append(f"📄 `{fname}` — ❌ {error[1][:60]}")
+            else:
+                file_lines.append(f"📄 `{fname}` — ❌ unknown error")
 
-            if msg_id:
-                await _edit(msg_id, result)
-                return None  # Already sent
-            return result
+        probe_status = "✅ Verified" if probe_ok else "⚠️ Probe failed (index may be empty)"
 
-        except Exception as e:
-            logger.error("Index rebuild failed: %s", e, exc_info=True)
-            error_msg = (
-                f"⚠️ *Index rebuild failed:*\n"
-                f"`{str(e)[:300]}`\n\n"
-                "Make sure Ollama is running (`ollama serve`)."
-            )
-            if msg_id:
-                await _edit(msg_id, error_msg)
-                return None
-            return error_msg
+        result_text = (
+            f"✅ *Index built!*\n"
+            f"   Docs: {docs_ok} | Chunks: {chunks} | ~{words:,} words ({elapsed:.0f}s)\n"
+            f"   {probe_status}\n\n" +
+            "\n".join(file_lines) + "\n"
+        )
 
+        if failed > 0:
+            result_text += f"\n⚠️ {failed} file(s) could not be parsed.\n"
+
+        if chunks == 0:
+            result_text += ("\n❌ *WARNING: 0 chunks indexed.*\n"
+                            "The index appears empty. Try `/index` again or check file formats.")
+
+        result_text += "\n\nTry `/ask` or `/quiz` to study!"
+
+        if msg_id:
+            await _edit(msg_id, result_text)
+            return None
+        return result_text
 
     async def _handle_files(self, ctx: BotContext) -> str:
         """Handle /files — list all files with numeric IDs."""
