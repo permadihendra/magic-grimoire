@@ -101,17 +101,18 @@ Available tools:
   Use for: quickly checking what documents cover a topic before asking.
 
 Rules:
-1. CRITICAL: For ask/quiz/summarize — do NOT write answers BEFORE the tool.
-2. CRITICAL: ONE ask() call per user question. Do NOT split into multiple ask() calls for different documents. "world economy and financial paradigm" is likely ONE book — pass the main title as document.
-3. DOCUMENT DETECTION: When user mentions a book name, pass it as document parameter. Match against list_docs() output.
-4. DOCUMENT CORRECTION: If user says wrong source → feedback(type="wrong_source") → retry with corrected document.
-5. Use conversation context for follow-ups.
-6. After tool output, suggest a quiz or deeper explanation.
-7. difficulty="simple" for confused users, "advanced" for detailed requests.
-8. Chain MULTIPLE tools OK (quiz after ask) but NOT multiple asks for one question.
-9. Keep text minimal — tools do the heavy lifting.
-10. Respond in user's language.
-11. NOT FOUND: acknowledge honestly, suggest alternatives.
+1. CRITICAL: For ANY question about document content, you MUST call ask(). Do NOT answer from your training data. The ask() output shows "📖 *Primary source:*" if documents were used.
+2. NEVER say "I couldn't find" or "it appears" without calling ask() first. Always call ask() — let the RAG engine decide if content exists.
+3. ONE ask() call per question. Do NOT split into multiple tools for one question.
+4. DOCUMENT DETECTION: When user mentions a book name, pass it as document parameter.
+5. DOCUMENT CORRECTION: User says wrong source → feedback(type="wrong_source") + retry with corrected doc.
+6. Use conversation context for follow-ups.
+7. After tool output, suggest a quiz or deeper explanation.
+8. difficulty="simple" for confused, "advanced" for detailed.
+9. Chain MULTIPLE tools OK (quiz after ask) but NOT multiple asks for one.
+10. Keep text minimal — tools do the heavy lifting.
+11. Respond in user's language.
+12. NOT FOUND: ask() already handles this. Trust the tool output.
 
 Format for TOOL lines:
 TOOL: tool_name(param1="value1", param2=123)
@@ -435,6 +436,12 @@ class BrainPlugin(Plugin):
 
         # ── 2. Check for TOOL: lines ─────────────────────
         if "TOOL:" not in response:
+            # No tool was called — Gemini answered from training data
+            response += ("\n\n"
+                "\u2139\ufe0f *This answer came from my training data, not your documents.*\n"
+                "For document-sourced answers, use `/ask <question>` "
+                "or say \"search your documents for...\""
+            )
             _remember(chat_id, message, response)
             return response  # Fast path — gateway sends reply
 

@@ -182,7 +182,9 @@ class RAGEngine:
         """Query the index and return the answer."""
         retriever = self._get_retriever()
         nodes = retriever.retrieve(question)
-        context = "\n\n".join(n.text for n in nodes if n.text)
+        chunk_texts = [n.text for n in nodes if n.text]
+        total_tokens = sum(len(t.split()) * 1.3 for t in chunk_texts)
+        logger.info("Retrieval(query): %d chunks, ~%d tokens", len(chunk_texts), int(total_tokens))
 
         if mode == "quiz":
             prompt_template = get_quiz_prompt(count, difficulty)
@@ -191,16 +193,18 @@ class RAGEngine:
         else:
             prompt_template = get_qa_prompt(difficulty)
 
+        # For quiz/summary: use tree_summarize with the prompt as system instruction
         from app.rag.models import get_llm
         from app.rag.guard import OllamaGuard, OllamaBusyError, OllamaDeadError
-
-        full_prompt = f"{prompt_template}\n\nContext:\n{context}\n\nQuestion: {question}"
 
         try:
             async with OllamaGuard("question answering", timeout=120):
                 llm = get_llm()
-                response = await asyncio.wait_for(
-                    llm.acomplete(full_prompt), timeout=120
+                from llama_index.core.response_synthesizers import TreeSummarize
+                synthesizer = TreeSummarize(llm=llm)
+                response = await synthesizer.aget_response(
+                    question,
+                    chunk_texts,
                 )
                 return str(response)
         except OllamaBusyError as e:
@@ -320,10 +324,15 @@ class RAGEngine:
                 "sources": [],
             }
 
-        # --- Phase 2: Async LLM generation ---
-        context = "\n\n".join(n.text for n in nodes if n.text)
-        prompt = get_qa_prompt(difficulty)
-        full_prompt = f"{prompt}\n\nContext:\n{context}\n\nQuestion: {question}"
+        # --- Phase 2: Async LLM generation (tree_summarize) ---
+        chunk_texts = [n.text for n in nodes if n.text]
+        
+        # Log retrieval diagnostics
+        total_tokens = sum(len(t.split()) * 1.3 for t in chunk_texts)
+        logger.info(
+            "Retrieval: %d chunks, ~%d tokens (k=%s, ctx=%s)",
+            len(chunk_texts), int(total_tokens), settings.retrieval_top_k, 2048,
+        )
 
         from app.rag.models import get_llm
         from app.rag.guard import OllamaGuard, OllamaBusyError, OllamaDeadError
@@ -331,8 +340,11 @@ class RAGEngine:
         try:
             async with OllamaGuard("answer generation", timeout=120):
                 llm = get_llm()
-                response = await asyncio.wait_for(
-                    llm.acomplete(full_prompt), timeout=120
+                from llama_index.core.response_synthesizers import TreeSummarize
+                synthesizer = TreeSummarize(llm=llm)
+                response = await synthesizer.aget_response(
+                    question,
+                    chunk_texts,
                 )
                 answer = str(response)
         except OllamaBusyError as e:
@@ -397,6 +409,17 @@ class RAGEngine:
                     else:
                         citations.append(f"{label} {short}")
             answer += "\n\n" + "\n".join(citations)
+
+        # --- Diagnostics footer: chunk count + token size ---
+        chunk_texts = [n.text for n in nodes if n.text]
+        total_tokens = sum(len(t.split()) * 1.3 for t in chunk_texts)
+        diag = [
+            "",
+            f"📊 *Retrieval:* {len(chunk_texts)} chunks | "
+            f"~{int(total_tokens)} tokens | k={settings.retrieval_top_k} | "
+            f"ctx=2048"
+        ]
+        answer += "\n" + "\n".join(diag)
 
         if low_confidence and cited:
             answer += (

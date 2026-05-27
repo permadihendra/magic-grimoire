@@ -41,7 +41,8 @@ def get_llm() -> Ollama:
             base_url=settings.ollama_base_url,
             request_timeout=timeout,
             temperature=0.0,
-            context_window=4096,
+            context_window=2048,
+            num_predict=256,
         )
     return _llm
 

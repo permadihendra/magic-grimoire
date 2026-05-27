@@ -29,9 +29,9 @@ class Settings(BaseSettings):
 
     # ── RAG ───────────────────────────────────────────────
     docs_dir: str = "app/docs"
-    chunk_size: int = 512
-    chunk_overlap: int = 50
-    retrieval_top_k: int = 5
+    chunk_size: int = 256
+    chunk_overlap: int = 30
+    retrieval_top_k: int = 3
 
     # ── Database ──────────────────────────────────────────
     db_path: str = "data/magic-grimoire.db"
