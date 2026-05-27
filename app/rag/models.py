@@ -4,6 +4,7 @@ Manages the LLM and embedding model instances used by LlamaIndex.
 All inference runs locally via Ollama — no cloud API costs.
 """
 
+import asyncio
 import logging
 
 from llama_index.embeddings.ollama import OllamaEmbedding
@@ -104,12 +105,16 @@ async def warm_up(progress_callback=None) -> None:
         import ollama
         from app.rag.guard import OllamaGuard
 
-        async with OllamaGuard("model warm-up", timeout=60, require_health=False):
+        async with OllamaGuard("model warm-up", require_health=False):
             client = ollama.AsyncClient(host=settings.ollama_base_url)
-            await client.chat(
-                model=settings.ollama_llm_model,
-                messages=[{"role": "user", "content": "Say OK"}],
-                options={"num_predict": 2},  # generate just 2 tokens
+            # Wrap in timeout — guard's timeout param isn't auto-applied
+            await asyncio.wait_for(
+                client.chat(
+                    model=settings.ollama_llm_model,
+                    messages=[{"role": "user", "content": "Say OK"}],
+                    options={"num_predict": 2},
+                ),
+                timeout=60.0,  # 60s max for warm-up
             )
         _warmed_up = True
         logger.info("Model %s warmed up successfully", settings.ollama_llm_model)
