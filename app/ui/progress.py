@@ -102,7 +102,9 @@ class ProgressWatcher:
             self._task = None
 
     async def _edit(self, text: str) -> None:
-        """Edit the watched message."""
+        """Edit the watched message. Truncates if too long."""
+        if len(text) > 4000:
+            text = text[:3975] + "\n... (truncated)"
         try:
             url = f"https://api.telegram.org/bot{self._bot_token}/editMessageText"
             async with httpx.AsyncClient(timeout=10) as client:
@@ -119,23 +121,45 @@ class ProgressWatcher:
             logger.debug("ProgressWatcher edit failed: %s", e)
 
     async def _watch_loop(self) -> None:
-        """Send phase-aware updates every `interval` seconds."""
+        """Send phase-aware updates with escalating frequency."""
         try:
-            # First report: don't wait — send immediately if phase already active
-            await asyncio.sleep(self.interval)
-
-            while True:
-                if self.state.complete:
-                    return
-
-                msg = self._build_report()
+            # Phase 0: Immediate report (t=0.5s — let the message settle first)
+            await asyncio.sleep(0.5)
+            if not self.state.complete:
+                msg = self._build_initial_report()
                 if msg:
                     await self._edit(msg)
                     self._reports_sent += 1
 
-                await asyncio.sleep(self.interval)
+            # Phase 1: Escalating intervals — 30s, 30s, 15s, 15s, 15s...
+            intervals = [30, 30, 15, 15, 15, 15, 15, 15]
+            for interval in intervals:
+                await asyncio.sleep(interval)
+                if self.state.complete:
+                    return
+                msg = self._build_report()
+                if msg:
+                    await self._edit(msg)
+                    self._reports_sent += 1
         except asyncio.CancelledError:
             pass
+
+    def _build_initial_report(self) -> Optional[str]:
+        """First report at t=0 — what's about to happen."""
+        if self.state.phase == "generate":
+            if self.state.passages_found > 0:
+                short = ", ".join(
+                    self._short_name(n) for n in (self.state.passages_docs or [])[:2]
+                )
+                return (
+                    f"Found {self.state.passages_found} passages from {short}. "
+                    "Generating answer... (this may take 10-60s)"
+                )
+            return "Generating answer from retrieved passages... (est. 10-60s)"
+        elif self.state.phase in ("index_embed", "index_parse"):
+            total = self.state.files_total or self.state.chunks_total or "?"
+            return f"Starting indexing ({total} items)... (est. 30-90s)"
+        return None
 
     def _build_report(self) -> Optional[str]:
         """Build a contextual progress report based on current phase."""
@@ -195,27 +219,27 @@ class ProgressWatcher:
 
     def _escalating_message(self, elapsed: int, total: int) -> Optional[str]:
         """Escalate tone as time increases."""
-        if elapsed < 60:
-            return None  # Don't nag before first interval
-        elif elapsed < 120:
+        if elapsed < 15:
+            return None  # Too early to nag
+        elif elapsed < 45:
             return (
                 f"Still writing your answer ({elapsed}s). "
-                "Normal for detailed questions."
+                "Working through the material."
+            )
+        elif elapsed < 90:
+            return (
+                f"Taking a bit longer ({elapsed}s). "
+                "Generating a thorough response."
             )
         elif elapsed < 180:
             return (
-                f"Taking longer than expected ({elapsed}s). "
-                "Working through the material carefully."
-            )
-        elif elapsed < 300:
-            return (
-                f"Long generation ({elapsed}s). "
-                "If this persists, try a simpler question or /index."
+                f"Complex question — still working ({elapsed}s). "
+                "If this persists, try a simpler phrasing."
             )
         else:
             return (
                 f"Very long generation ({elapsed}s). "
-                "The query may time out soon. Consider a shorter question."
+                "May time out. Try /index or a shorter question."
             )
 
     @staticmethod

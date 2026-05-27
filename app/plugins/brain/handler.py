@@ -101,27 +101,17 @@ Available tools:
   Use for: quickly checking what documents cover a topic before asking.
 
 Rules:
-1. CRITICAL: For ask/quiz/summarize tools — do NOT write any conversational text or answers BEFORE the tool. Let the tool produce the complete answer. You may add ONE short line AFTER the tool (a suggestion or follow-up question).
-2. DOCUMENT DETECTION: When the user mentions a book name:
-   - ALWAYS pass it as the document parameter
-   - Match against what list_docs() shows — use partial name matching
-   - "world economy book" → document="World Economy" (not the full EPUB filename)
-   - "finance for normal people" → document="Finance for Normal People"
-   - If unsure which document, use list_docs() first
-3. DOCUMENT CORRECTION: If the user says the answer came from the wrong document:
-   - IMMEDIATELY call feedback(type="wrong_source", detail="<wrong doc name>")
-   - Then retry ask() with the CORRECT document parameter
-   - Example: User says "that's from Finance, not World Economy" →
-     TOOL: feedback(type="wrong_source", detail="Finance for Normal People")
-     TOOL: ask(query="...", document="World Economy")
-4. Use conversation context for follow-ups like "tell me more", "explain that".
-5. After the tool output, naturally suggest: a quiz, a related topic, or deeper explanation.
-6. If user seems confused, use difficulty="simple".
-7. If user asks for advanced/detailed content, use difficulty="advanced".
-8. You can chain MULTIPLE tools in one response.
-9. Keep your text minimal — the tools do the heavy lifting.
-10. Respond in the user's language (Indonesian or English).
-11. NOT FOUND HANDLING: If the tool returns empty, "not found", or a very short answer — acknowledge it honestly. Don't pretend you found something. Suggest: different keywords, upload relevant docs, or check /files.
+1. CRITICAL: For ask/quiz/summarize — do NOT write answers BEFORE the tool.
+2. CRITICAL: ONE ask() call per user question. Do NOT split into multiple ask() calls for different documents. "world economy and financial paradigm" is likely ONE book — pass the main title as document.
+3. DOCUMENT DETECTION: When user mentions a book name, pass it as document parameter. Match against list_docs() output.
+4. DOCUMENT CORRECTION: If user says wrong source → feedback(type="wrong_source") → retry with corrected document.
+5. Use conversation context for follow-ups.
+6. After tool output, suggest a quiz or deeper explanation.
+7. difficulty="simple" for confused users, "advanced" for detailed requests.
+8. Chain MULTIPLE tools OK (quiz after ask) but NOT multiple asks for one question.
+9. Keep text minimal — tools do the heavy lifting.
+10. Respond in user's language.
+11. NOT FOUND: acknowledge honestly, suggest alternatives.
 
 Format for TOOL lines:
 TOOL: tool_name(param1="value1", param2=123)
@@ -349,6 +339,17 @@ async def _progress_timer(chat_id: int, message_id: int,
                 f"⏳ Still {label}... ({elapsed}s elapsed)")
     except asyncio.CancelledError:
         pass
+# ── Telegram message helpers ────────────────────────────
+
+_MAX_TELEGRAM_LENGTH = 4000  # 4096 limit minus safety margin
+
+def _safe_truncate(text: str, max_len: int = _MAX_TELEGRAM_LENGTH) -> str:
+    """Truncate text to fit Telegram message limit."""
+    if len(text) <= max_len:
+        return text
+    # Truncate at word boundary
+    cut = text[:max_len - 25].rstrip()
+    return cut + "\n\n... (truncated)"
 
 
 async def _send_telegram_message(chat_id: int, text: str) -> dict | None:
@@ -559,6 +560,9 @@ class BrainPlugin(Plugin):
             conv_text = "\n".join(conversational_parts).strip()
             tool_text = "\n\n".join(result_lines).strip()
             final_reply = f"{conv_text}\n\n{tool_text}" if conv_text else tool_text
+
+            # Truncate if too long for Telegram (4096 char limit)
+            final_reply = _safe_truncate(final_reply)
 
             if thinking_id:
                 ok = await _edit_message(chat_id, thinking_id, final_reply)
