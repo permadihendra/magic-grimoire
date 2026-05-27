@@ -34,6 +34,13 @@ PORT=8123
 
 cd "${PROJECT_DIR}"
 
+# Set TESSDATA_PREFIX for LiteParse OCR (if tessdata exists)
+if [ -d "/usr/share/tesseract-ocr/5/tessdata" ]; then
+    export TESSDATA_PREFIX="/usr/share/tesseract-ocr/5/tessdata"
+elif [ -d "/usr/share/tesseract-ocr/4/tessdata" ]; then
+    export TESSDATA_PREFIX="/usr/share/tesseract-ocr/4/tessdata"
+fi
+
 # ── Colors ────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }

@@ -42,9 +42,10 @@ def _parse_document_raw(raw_bytes: bytes, fname: str) -> LIDocument | None:
     try:
         from liteparse import LiteParse
 
-        # Disable OCR by default — most PDFs have text layers.
-        # Install tesseract-ocr + set TESSDATA_PREFIX for OCR support.
-        parser = LiteParse(ocr_enabled=False, quiet=True)
+        # OCR enabled for scanned PDFs. Requires tesseract-ocr and TESSDATA_PREFIX.
+        # Install: sudo apt install tesseract-ocr
+        # Set in start-bot.sh or .env: TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata/
+        parser = LiteParse(ocr_enabled=True, quiet=True)
         result = parser.parse(raw_bytes)
         text = result.text.strip()
         if text:
