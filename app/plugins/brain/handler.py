@@ -268,7 +268,7 @@ async def _tool_list_docs() -> str:
     try:
         db = await get_db()
         cursor = await db.execute(
-            "SELECT filename, file_size, chunk_count, indexed_at FROM documents "
+            "SELECT filename, file_size, chunk_count, indexed_at, display_name FROM documents "
             "ORDER BY indexed_at DESC"
         )
         rows = await cursor.fetchall()
@@ -289,7 +289,7 @@ async def _tool_list_docs() -> str:
             except (ValueError, TypeError):
                 indexed_fmt = str(indexed)
 
-            name = r["filename"].replace(".pdf", "").replace("-", " ").replace("_", " ")
+            name = r["display_name"] or r["filename"].replace(".pdf", "").replace("-", " ").replace("_", " ")
             lines.append(f"📄 **{name}**")
             lines.append(f"   └─ {size_mb:.1f} MB · {chunks} chunks · indexed {indexed_fmt}")
             lines.append("")

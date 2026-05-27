@@ -28,6 +28,55 @@ INDEX_STORAGE_DIR = os.path.join(
 )
 
 
+# ── Filename Cleaner (Gemini + fallback) ─────────────
+
+_FILENAME_CLEAN_PROMPT = """Extract a clean, readable book title from this filename.
+Remove: author names, publisher info, years in parentheses, edition numbers, file extensions.
+Return ONLY the title, nothing else. No quotes, no prefixes.
+
+Examples:
+"Statman, Meir - Finance for normal people _ how investors and markets behave-Oxford University Press (2017).pdf"
+-> Finance for Normal People
+
+"The_World_Economy_and_Financial_System_A_Paradigm_Change_Offering.epub"
+-> The World Economy and Financial System: A Paradigm Change Offering
+
+Now clean this filename:"""
+
+
+async def _gemini_clean_filename(raw_filename: str) -> str:
+    """Ask Gemini to clean a filename into a book title. Falls back to simple clean."""
+    try:
+        from app.llm.gemini import gemini_chat
+        response = await gemini_chat(
+            system_prompt=_FILENAME_CLEAN_PROMPT,
+            user_message=raw_filename,
+            max_tokens=50,
+            timeout=8.0,
+        )
+        cleaned = response.strip().strip('"').strip("'")
+        if cleaned and len(cleaned) >= 3:
+            logger.info("Gemini cleaned filename: %s -> %s", raw_filename[:50], cleaned)
+            return cleaned
+    except Exception as e:
+        logger.debug("Gemini filename clean failed: %s", e)
+    
+    # Fallback: simple normalization
+    return _simple_clean_filename(raw_filename)
+
+
+def _simple_clean_filename(raw: str) -> str:
+    """Simple filename cleaning without Gemini."""
+    name = raw.rsplit(".", 1)[0]
+    for sep in ["_", "-", "\u2013", "\u2014"]:
+        name = name.replace(sep, " ")
+    name = " ".join(name.split())
+    # Truncate long names
+    if len(name) > 50:
+        name = name[:47].rsplit(" ", 1)[0] + "..."
+    return name.strip()
+
+
 # ── Parser: LiteParse with fallback ──────────────────────
 
 
@@ -270,10 +319,12 @@ class DocumentIndexer:
             fpath = os.path.join(docs_dir, fname)
             try:
                 size = os.path.getsize(fpath)
+                # Get clean display name via Gemini (with fallback)
+                display_name = await _gemini_clean_filename(fname)
                 await db.execute(
-                    "INSERT OR REPLACE INTO documents (filename, filepath, file_size) "
-                    "VALUES (?, ?, ?)",
-                    (fname, fpath, size),
+                    "INSERT OR REPLACE INTO documents (filename, filepath, file_size, display_name) "
+                    "VALUES (?, ?, ?, ?)",
+                    (fname, fpath, size, display_name),
                 )
             except OSError:
                 pass

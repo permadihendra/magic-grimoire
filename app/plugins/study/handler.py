@@ -284,6 +284,8 @@ class StudyPlugin(Plugin):
 
         # Progress watcher for long indexing
         from app.ui.progress import ProgressState, ProgressWatcher
+        from app.rag.knowledge_cache import invalidate_cache
+        await invalidate_cache()  # Clear stale cached answers
         progress = ProgressState()
         progress.start_phase("index_parse")
         progress.files_total = len(files)

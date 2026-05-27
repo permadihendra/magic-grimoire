@@ -35,9 +35,16 @@ async def init_db() -> None:
             filepath TEXT NOT NULL UNIQUE,
             file_size INTEGER DEFAULT 0,
             chunk_count INTEGER DEFAULT 0,
+            display_name TEXT,
             indexed_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Add display_name if upgrading from older schema
+    try:
+        await db.execute("ALTER TABLE documents ADD COLUMN display_name TEXT")
+    except Exception:
+        pass  # Column already exists
 
     # Query history (for future context)
     await db.execute("""
@@ -51,6 +58,57 @@ async def init_db() -> None:
     """)
 
     await db.commit()
+
+    # Knowledge cache — Q&A pairs for fast repeat queries
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_pairs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            question TEXT NOT NULL,
+            question_embedding BLOB,
+            short_answer TEXT NOT NULL,
+            full_answer TEXT NOT NULL,
+            source_doc TEXT,
+            retrieval_score REAL DEFAULT 0.0,
+            approved INTEGER DEFAULT 0,
+            used_count INTEGER DEFAULT 0,
+            chat_id INTEGER,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_used_at DATETIME
+        )
+    """)
+
+    # FTS5 full-text search on document names
+    await db.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
+            filename,
+            display_name,
+            content=documents,
+            content_rowid=id
+        )
+    """)
+
+    # Triggers to keep FTS5 in sync
+    await db.execute("""
+        CREATE TRIGGER IF NOT EXISTS docs_fts_ai AFTER INSERT ON documents BEGIN
+            INSERT INTO documents_fts(rowid, filename, display_name)
+            VALUES (new.id, new.filename, new.display_name);
+        END
+    """)
+    await db.execute("""
+        CREATE TRIGGER IF NOT EXISTS docs_fts_ad AFTER DELETE ON documents BEGIN
+            INSERT INTO documents_fts(documents_fts, rowid, filename, display_name)
+            VALUES ('delete', old.id, old.filename, old.display_name);
+        END
+    """)
+    await db.execute("""
+        CREATE TRIGGER IF NOT EXISTS docs_fts_au AFTER UPDATE ON documents BEGIN
+            INSERT INTO documents_fts(documents_fts, rowid, filename, display_name)
+            VALUES ('delete', old.id, old.filename, old.display_name);
+            INSERT INTO documents_fts(rowid, filename, display_name)
+            VALUES (new.id, new.filename, new.display_name);
+        END
+    """)
+
     logger.info("Database initialized")
 
 

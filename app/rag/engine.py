@@ -28,6 +28,24 @@ logger = logging.getLogger(__name__)
 _MAX_SOURCES = 3
 
 
+def _filename_match(fname: str, doc_ref: str) -> bool:
+    """Check if a filename matches a document reference."""
+    f = fname.lower().replace("_", " ").replace(".", " ")
+    d = doc_ref.lower().replace("_", " ").replace(".", " ")
+    f_words = set(f.split())
+    d_words = set(d.split()) - {"a", "an", "the", "and", "or", "but", "for", "nor",
+                                "of", "in", "on", "at", "to", "by", "with", "from",
+                                "pdf", "epub", "book", "books"}
+    if not d_words:
+        return False
+    return len(d_words & f_words) >= len(d_words) * 0.5
+
+
+def _lookup_display_name(filename: str) -> str:
+    """Get display name for a filename. Falls back to shorten_filename."""
+    return shorten_filename(filename)
+
+
 def shorten_filename(filename: str) -> str:
     """Transform ugly filenames into clean, readable book titles."""
     name = filename.rsplit(".", 1)[0] if "." in filename else filename
@@ -106,21 +124,12 @@ class RAGEngine:
         retriever = self._get_retriever()
         nodes = retriever.retrieve(question)
 
-        # Apply document boosting (PLAN #6 + PLAN audit fix)
+        # Apply document boosting
         if document:
-            doc_words = set(document.lower().replace("_", " ").replace(".", " ").split())
-            stopwords = {"a", "an", "the", "and", "or", "but", "for", "nor", "of",
-                        "in", "on", "at", "to", "by", "with", "from", "pdf", "epub"}
-            doc_words -= stopwords
             for node in nodes:
-                fname = node.metadata.get("file_name", "").lower()
-                fname_norm = fname.replace("_", " ").replace(".", " ")
-                fname_words = set(fname_norm.split())
-                if doc_words:
-                    overlap = len(doc_words & fname_words) / len(doc_words)
-                    if overlap >= 0.5:
-                        boost = 1.0 + (overlap * 1.0)
-                        node.score = (node.score or 0) * boost
+                fname = node.metadata.get("file_name", "")
+                if _filename_match(fname, document):
+                    node.score = (node.score or 0) * 2.0
 
         # Apply feedback learner adjustments
         if chat_id is not None:
@@ -130,26 +139,23 @@ class RAGEngine:
                 fname = node.metadata.get("file_name", "")
                 node.score = learner.adjust_score(fname, node.score or 0)
 
-        # Post-retrieval filtering: force named-doc chunks first
+        # Post-retrieval filtering
         if document:
             doc_nodes = []
             other_nodes = []
             for node in nodes:
-                fname = node.metadata.get("file_name", "").lower()
-                fname_norm = fname.replace("_", " ").replace(".", " ")
-                fname_words_set = set(fname_norm.split())
-                if doc_words:
-                    overlap2 = len(doc_words & fname_words_set) / len(doc_words)
-                    if overlap2 >= 0.5:
-                        doc_nodes.append(node)
-                        continue
-                other_nodes.append(node)
+                if _filename_match(node.metadata.get("file_name", ""), document):
+                    doc_nodes.append(node)
+                else:
+                    other_nodes.append(node)
             if doc_nodes:
+                doc_nodes.sort(key=lambda n: n.score or 0, reverse=True)
+                other_nodes.sort(key=lambda n: n.score or 0, reverse=True)
                 forced_count = min(2, len(doc_nodes))
                 remaining = max(0, 5 - forced_count)
                 nodes = doc_nodes[:forced_count] + other_nodes[:remaining]
-
-        nodes.sort(key=lambda n: n.score or 0, reverse=True)
+        else:
+            nodes.sort(key=lambda n: n.score or 0, reverse=True)
 
         passages = []
         seen_files = set()
@@ -224,6 +230,22 @@ class RAGEngine:
         Returns:
             Dict with 'answer' (str) and 'sources' (list of dicts).
         """
+        # --- Phase 0: Knowledge cache check ---
+        if chat_id is not None:
+            try:
+                from app.rag.knowledge_cache import search_cache
+                cached = await search_cache(question, document, chat_id)
+                if cached and cached["similarity"] >= 0.92:
+                    return {
+                        "answer": cached["full_answer"],
+                        "sources": [{
+                            "filename": cached.get("source_doc", "Unknown"),
+                            "score": cached["similarity"],
+                        }],
+                    }
+            except Exception as e:
+                logger.debug("Cache check failed: %s", e)
+
         # --- Phase 1: Sync retrieval with document boosting + feedback ---
         retriever = self._get_retriever()
         nodes = retriever.retrieve(question)
@@ -234,22 +256,12 @@ class RAGEngine:
             from app.rag.feedback import get_learner
             learner = get_learner(chat_id)
 
-        # Document-aware boosting (PLAN #6 + fuzzy matching)
+        # Document-aware boosting (FTS5 resolves name → exact match)
         if document:
-            doc_words = set(document.lower().replace("_", " ").replace(".", " ").split())
-            stopwords = {"a", "an", "the", "and", "or", "but", "for", "nor", "of",
-                        "in", "on", "at", "to", "by", "with", "from", "pdf", "epub"}
-            doc_words -= stopwords
-
             for node in nodes:
-                fname = node.metadata.get("file_name", "").lower()
-                fname_norm = fname.replace("_", " ").replace(".", " ")
-                fname_words = set(fname_norm.split())
-                if doc_words:
-                    overlap = len(doc_words & fname_words) / len(doc_words)
-                    if overlap >= 0.5:
-                        boost = 1.0 + (overlap * 1.0)
-                        node.score = (node.score or 0) * boost
+                fname = node.metadata.get("file_name", "")
+                if _filename_match(fname, document):
+                    node.score = (node.score or 0) * 2.0  # 2x for named doc chunks
 
         # Apply feedback learner adjustments (PLAN retrieval quality Phase 2)
         blocked_docs = set()
@@ -260,30 +272,25 @@ class RAGEngine:
                 node.score = learner.adjust_score(fname, node.score or 0)
 
         # Post-retrieval filtering: force named-doc chunks into context
-        # (PLAN retrieval quality Phase 1 — guarantees relevant doc in context)
         if document:
             doc_nodes = []
             other_nodes = []
             for node in nodes:
-                fname = node.metadata.get("file_name", "").lower()
-                fname_norm = fname.replace("_", " ").replace(".", " ")
-                fname_words_set = set(fname_norm.split())
-                if doc_words:
-                    overlap = len(doc_words & fname_words_set) / len(doc_words)
-                    if overlap >= 0.5:
-                        doc_nodes.append(node)
-                        continue
-                other_nodes.append(node)
-            
+                fname = node.metadata.get("file_name", "")
+                if _filename_match(fname, document):
+                    doc_nodes.append(node)
+                else:
+                    other_nodes.append(node)
+
             if doc_nodes:
-                # Guarantee top-2 from named doc, fill rest from others
+                # Group-sort: sort within each group, keep doc_nodes priority
+                doc_nodes.sort(key=lambda n: n.score or 0, reverse=True)
+                other_nodes.sort(key=lambda n: n.score or 0, reverse=True)
                 forced_count = min(2, len(doc_nodes))
                 remaining = max(0, 5 - forced_count)
                 nodes = doc_nodes[:forced_count] + other_nodes[:remaining]
-            # If no matching doc nodes found, keep original order
-
-        # Sort final selection by (adjusted) score
-        nodes.sort(key=lambda n: n.score or 0, reverse=True)
+        else:
+            nodes.sort(key=lambda n: n.score or 0, reverse=True)
 
         # Extract unique sources
         seen_files = set()
@@ -380,14 +387,15 @@ class RAGEngine:
         if cited:
             citations = []
             seen = set()
-            for s in cited:
-                short = shorten_filename(s["filename"])
+            for i, s in enumerate(cited):
+                short = _lookup_display_name(s["filename"])
                 if short not in seen:
                     seen.add(short)
+                    label = "📖 *Primary source:*" if i == 0 else "📎 *Also:*"
                     if s["score"] < 0.7:
-                        citations.append(f"📖 *Source:* {short} ⚠️ low relevance")
+                        citations.append(f"{label} {short} ⚠️ low relevance")
                     else:
-                        citations.append(f"📖 *Source:* {short}")
+                        citations.append(f"{label} {short}")
             answer += "\n\n" + "\n".join(citations)
 
         if low_confidence and cited:
@@ -396,6 +404,20 @@ class RAGEngine:
                 "this topic well. Try a different question or upload "
                 "relevant material."
             )
+
+        # Store in knowledge cache for future queries
+        if chat_id is not None and len(answer.strip()) >= 100:
+            try:
+                from app.rag.knowledge_cache import store_pair
+                import asyncio as _asyncio
+                _asyncio.create_task(
+                    store_pair(question, answer, 
+                               source_doc=sources[0]["filename"] if sources else None,
+                               retrieval_score=top_score,
+                               chat_id=chat_id, approved=False)
+                )
+            except Exception as e:
+                logger.debug("Cache store failed: %s", e)
 
         return {
             "answer": answer,
