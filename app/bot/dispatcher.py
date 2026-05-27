@@ -4,19 +4,33 @@ Handles:
 - Document uploads → confirm → save → index
 - Slash commands → plugin
 - Free text → BrainPlugin (Gemini agent)
+
+All plugins return: DispatchResult(reply, processing_metadata | None)
+Processing metadata dict: {backend, chunks, cache_hit, elapsed_ms}
 """
 
 import logging
 import os
+from dataclasses import dataclass
+from typing import Any
 
 from app.config import settings
 from app.plugins.base import PluginRegistry
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class DispatchResult:
+    """Result from dispatch: the reply text plus optional processing metadata."""
+    reply: str | None
+    processing: dict[str, Any] | None = None
+
+
 # ── Pending file confirmations ───────────────────────────
 # {chat_id: {"file_id": ..., "file_name": ..., "file_size": ...}}
 _pending_confirm: dict[int, dict] = {}
+
 
 # ── Telegram helpers ─────────────────────────────────────
 
@@ -77,11 +91,11 @@ async def _download_telegram_file(file_id: str, dest_path: str) -> bool:
 # ── File upload handler ──────────────────────────────────
 
 
-async def _handle_document(message) -> str | None:
+async def _handle_document(message) -> None:
     """Handle a document/file upload — ask user for confirmation."""
     doc = message.document
     if not doc:
-        return None
+        return
 
     chat_id = message.chat_id
     file_id = doc.file_id
@@ -98,7 +112,7 @@ async def _handle_document(message) -> str | None:
             f"`{', '.join(sorted(allowed_extensions))}`\n\n"
             f"Your file `{file_name}` was ignored.",
         )
-        return None
+        return
 
     # Size check (Telegram allows up to 50MB)
     size_mb = file_size / (1024 * 1024)
@@ -107,7 +121,7 @@ async def _handle_document(message) -> str | None:
             chat_id,
             f"⚠️ File too large ({size_mb:.1f} MB). Maximum is 50 MB.",
         )
-        return None
+        return
 
     # Ask for confirmation
     _pending_confirm[chat_id] = {
@@ -121,10 +135,9 @@ async def _handle_document(message) -> str | None:
         f"📄 *Received:* `{file_name}` ({size_mb:.1f} MB)\n\n"
         f"Save this to your study documents? (reply `yes` or `no`)",
     )
-    return None  # Reply already sent
 
 
-async def _handle_confirmation(chat_id: int, text: str) -> str | None:
+async def _handle_confirmation(chat_id: int, text: str) -> DispatchResult | None:
     """Handle a yes/no confirmation for a pending file save."""
     pending = _pending_confirm.get(chat_id)
     if not pending:
@@ -132,12 +145,10 @@ async def _handle_confirmation(chat_id: int, text: str) -> str | None:
 
     answer = text.lower().strip()
     if answer in ("yes", "y", "ya", "yeah"):
-        # Proceed to download
         file_id = pending["file_id"]
         file_name = pending["file_name"]
         file_size = pending["file_size"]
 
-        # Clean up filename (remove weird chars)
         safe_name = "".join(c for c in file_name if c.isalnum() or c in "._- ").strip()
         if not safe_name:
             safe_name = f"document_{file_id[:8]}.pdf"
@@ -153,17 +164,19 @@ async def _handle_confirmation(chat_id: int, text: str) -> str | None:
 
         if success:
             size_mb = file_size / (1024 * 1024)
-            return (
+            reply = (
                 f"✅ *File saved!*\n\n"
                 f"📄 `{safe_name}` ({size_mb:.1f} MB) → `{docs_dir}/`\n\n"
                 f"Now run `/index` to index this document, then you can ask me anything about it!"
             )
         else:
-            return "⚠️ Failed to download file. Please try again or upload manually."
+            reply = "⚠️ Failed to download file. Please try again or upload manually."
 
-    elif answer in ("no", "n", "nope", "cancel"):
+        return DispatchResult(reply=reply)
+
+    if answer in ("no", "n", "nope", "cancel"):
         del _pending_confirm[chat_id]
-        return "🗑️ File ignored. You can upload again if you change your mind."
+        return DispatchResult(reply="🗑️ File ignored. You can upload again if you change your mind.")
 
     # Unclear response — stay in pending state
     await _send_message(
@@ -176,29 +189,31 @@ async def _handle_confirmation(chat_id: int, text: str) -> str | None:
 # ── Main dispatcher ──────────────────────────────────────
 
 
-async def dispatch(update, thinking_msg_id: int | None = None) -> str | None:
+async def dispatch(update, thinking_msg_id: int | None = None) -> DispatchResult:
     """Route incoming messages to the right handler."""
     message = update.message or update.edited_message
     if not message:
-        return None
+        return DispatchResult(reply=None)
 
     chat_id = message.chat_id
 
     # ── 1. Document uploads ─────────────────────────────
     if message.document:
-        return await _handle_document(message)
+        await _handle_document(message)
+        return DispatchResult(reply=None)
 
     # ── 2. Text messages ────────────────────────────────
     if not message.text:
         logger.debug("Received non-text update: %s", update.update_id)
-        return None
+        return DispatchResult(reply=None)
 
     text = message.text.strip()
 
     # ── 3. Confirmation responses (yes/no for pending saves) ──
     if text.lower() in ("yes", "y", "ya", "yeah", "no", "n", "nope", "cancel"):
-        if chat_id in _pending_confirm:
-            return await _handle_confirmation(chat_id, text)
+        confirm = await _handle_confirmation(chat_id, text)
+        if confirm:
+            return confirm
 
     # Handle Telegram reply feature
     reply_to = message.reply_to_message
@@ -218,25 +233,37 @@ async def dispatch(update, thinking_msg_id: int | None = None) -> str | None:
         plugin = registry.resolve(command)
         if plugin:
             try:
-                return await plugin.handle(ctx)
+                result = await plugin.handle(ctx)
+                if result is None:
+                    return DispatchResult(reply=None)
+                if isinstance(result, DispatchResult):
+                    return result
+                return DispatchResult(reply=result)
             except Exception as e:
                 logger.error("Plugin '%s' failed: %s", plugin.name, e, exc_info=True)
-                return f"⚠️ Error processing `/{command}`."
-        return None
+                return DispatchResult(reply=f"⚠️ Error processing `/{command}`.")
+        return DispatchResult(reply=None)
 
     # ── 5. Free text → BrainPlugin (Gemini agent) ───────
     registry = PluginRegistry.get()
     brain = registry.get_plugin("brain")
     if brain:
         try:
-            reply = await brain.handle(ctx)
-            return reply
+            result = await brain.handle(ctx)
+            if result is None:
+                return DispatchResult(reply=None)
+            if isinstance(result, DispatchResult):
+                return result
+            return DispatchResult(reply=result)
         except Exception as e:
             logger.error("Brain plugin failed: %s", e, exc_info=True)
             study = registry.get_plugin("study")
             if study:
                 try:
-                    return await study.handle(ctx)
+                    result = await study.handle(ctx)
+                    if isinstance(result, DispatchResult):
+                        return result
+                    return DispatchResult(reply=result)
                 except Exception as e2:
                     logger.error("Study fallback also failed: %s", e2)
-    return None
+    return DispatchResult(reply=None)

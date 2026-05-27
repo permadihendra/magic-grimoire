@@ -27,6 +27,19 @@ class SystemPlugin(Plugin):
         if cmd == "/status":
             return await self._build_status(ctx)
 
+        if cmd == "/summarize":
+            topic = ctx.message_text.strip()[len("/summarize"):].strip()
+            if not topic:
+                return (
+                    "📝 *Usage:* `/summarize <topic>`\n\n"
+                    "Example: `/summarize the main themes of this chapter`"
+                )
+            study = PluginRegistry.get().get_plugin("study")
+            if study:
+                result = await study.handle(ctx)
+                return result if isinstance(result, str) else result.reply
+            return "⚠️ Study plugin unavailable."
+
         return None
 
     async def _build_status(self, ctx: BotContext) -> str:
@@ -62,7 +75,9 @@ class SystemPlugin(Plugin):
             "`/ask <question>`\n"
             "  └─ Query your indexed documents\n"
             "`/quiz <topic>`\n"
-            "  └─ Generate practice questions\n\n"
+            "  └─ Generate practice questions\n"
+            "`/summarize <topic>`\n"
+            "  └─ Create a topic summary\n\n"
             "📂 *Documents*\n"
             "`/docs`\n"
             "  └─ List indexed documents\n"

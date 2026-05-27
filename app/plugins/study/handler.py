@@ -19,7 +19,7 @@ import time
 
 from app.config import settings
 from app.database import get_db
-from app.plugins.base import BotContext, Plugin
+from app.plugins.base import BotContext, Plugin, DispatchResult
 from app.rag.engine import RAGEngine
 from app.rag.indexer import DocumentIndexer
 from app.rag.models import warm_up
@@ -33,7 +33,7 @@ _doc_indexer: DocumentIndexer | None = None
 
 class StudyPlugin(Plugin):
     name = "study"
-    commands = ["ask", "quiz", "docs", "index", "files", "delete"]
+    commands = ["ask", "quiz", "docs", "index", "files", "delete", "summarize"]
     description = "RAG study agent — query documents, generate quizzes"
 
     async def on_load(self) -> None:
@@ -93,6 +93,9 @@ class StudyPlugin(Plugin):
 
         if cmd == "/delete":
             return await self._handle_delete(ctx)
+
+        if cmd == "/summarize":
+            return await self._handle_summarize(ctx)
 
         # Free text → auto-query with RAG
         return await self._handle_ask(ctx)
@@ -203,7 +206,6 @@ class StudyPlugin(Plugin):
 
         await self._progress(ctx, "📖 Loading your study materials...")
 
-        # Ensure index is ready
         error = await self._ensure_index_ready(ctx)
         if error:
             return error
@@ -213,13 +215,58 @@ class StudyPlugin(Plugin):
 
         try:
             t0 = time.time()
-            response = await _rag_engine.query(topic, mode="quiz")
+            result = await _rag_engine.query_with_sources(topic, mode="quiz", difficulty="normal", chat_id=ctx.chat_id)
             elapsed = time.time() - t0
             logger.info("Quiz generated in %.1fs", elapsed)
-            return response
+            response_text = result.get("answer", "") if isinstance(result, dict) else str(result)
+            processing = {
+                "backend": result.get("processing", {}).get("backend", "gpu") if isinstance(result, dict) else "gpu",
+                "chunks": result.get("processing", {}).get("chunks", 0) if isinstance(result, dict) else 0,
+                "cache_hit": result.get("processing", {}).get("cache_hit", False) if isinstance(result, dict) else False,
+                "elapsed_ms": elapsed * 1000,
+            }
+            return DispatchResult(reply=response_text, processing=processing)
         except Exception as e:
             logger.error("Quiz generation failed: %s", e, exc_info=True)
             return f"⚠️ *Quiz generation failed:* `{str(e)[:300]}`"
+
+    async def _handle_summarize(self, ctx: BotContext) -> str | DispatchResult:
+        """Handle /summarize <topic> — create a topic summary."""
+        text = ctx.message_text.strip()
+        topic = text[len("/summarize"):].strip()
+
+        if not topic:
+            return (
+                "📝 *Usage:* `/summarize <topic>`\n\n"
+                "Example: `/summarize the main themes of this chapter`\n"
+                "Example: `/summarize Kubernetes architecture`"
+            )
+
+        await self._progress(ctx, "📖 Loading your study materials...")
+
+        error = await self._ensure_index_ready(ctx)
+        if error:
+            return error
+
+        logger.info("Generating summary on: %s", topic)
+        await self._progress(ctx, "📄 Creating summary...")
+
+        try:
+            t0 = time.time()
+            result = await _rag_engine.query_with_sources(topic, mode="summary", difficulty="normal", chat_id=ctx.chat_id)
+            elapsed = time.time() - t0
+            logger.info("Summary generated in %.1fs", elapsed)
+            response_text = result.get("answer", "") if isinstance(result, dict) else str(result)
+            processing = {
+                "backend": result.get("processing", {}).get("backend", "gpu") if isinstance(result, dict) else "gpu",
+                "chunks": result.get("processing", {}).get("chunks", 0) if isinstance(result, dict) else 0,
+                "cache_hit": result.get("processing", {}).get("cache_hit", False) if isinstance(result, dict) else False,
+                "elapsed_ms": elapsed * 1000,
+            }
+            return DispatchResult(reply=response_text, processing=processing)
+        except Exception as e:
+            logger.error("Summary generation failed: %s", e, exc_info=True)
+            return f"⚠️ *Summary generation failed:* `{str(e)[:300]}`"
 
     async def _handle_docs(self, ctx: BotContext) -> str:
         """Handle /docs — list indexed documents with full metadata."""

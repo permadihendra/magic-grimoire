@@ -29,6 +29,15 @@ logger = logging.getLogger(__name__)
 _MAX_SOURCES = 3
 
 
+def _backend() -> str:
+    """Return the active embedding backend: 'gpu' (Ollama) or 'cpu' (sentence-transformers)."""
+    try:
+        from app.rag.embeddings import get_embed_backend
+        return get_embed_backend()
+    except Exception:
+        return "unknown"
+
+
 def _filename_match(fname: str, doc_ref: str) -> bool:
     """Check if a filename matches a document reference."""
     f = fname.lower().replace("_", " ").replace(".", " ")
@@ -223,6 +232,7 @@ class RAGEngine:
         difficulty: str = "normal",
         document: str | None = None,
         chat_id: int | None = None,
+        mode: str = "qa",  # "qa" | "quiz" | "summary"
     ) -> dict[str, Any]:
         """Query and return BOTH answer and source citations.
 
@@ -231,9 +241,10 @@ class RAGEngine:
             difficulty: 'simple', 'normal', or 'advanced'.
             document: Optional document name to boost scores for.
             chat_id: Telegram chat ID for feedback learning.
+            mode: 'qa', 'quiz', or 'summary' (controls prompt template).
 
         Returns:
-            Dict with 'answer' (str) and 'sources' (list of dicts).
+            Dict with 'answer' (str), 'sources' (list), and 'processing' (dict).
         """
         _qid = f"q_{int(time.time()*1000)%100000:05d}"
         _t0 = time.time()
@@ -249,6 +260,7 @@ class RAGEngine:
                     return {
                         "answer": "📭 *Index is empty.* Run `/index` to rebuild it.",
                         "sources": [],
+                        "processing": {"backend": "unknown", "chunks": 0, "cache_hit": False, "elapsed_ms": (time.time()-_t0)*1000},
                     }
                 logger.info("[%s]  index health: %d documents", _qid, doc_count)
             except Exception as e:
@@ -266,6 +278,7 @@ class RAGEngine:
                             "filename": cached.get("source_doc", "Unknown"),
                             "score": cached["similarity"],
                         }],
+                        "processing": {"backend": "cache", "chunks": 0, "cache_hit": True, "elapsed_ms": (time.time()-_t0)*1000},
                     }
             except Exception as e:
                 logger.debug("Cache check failed: %s", e)
@@ -342,6 +355,7 @@ class RAGEngine:
                     "• Uploading new material"
                 ),
                 "sources": [],
+                "processing": {"backend": _backend(), "chunks": 0, "cache_hit": False, "elapsed_ms": (time.time()-_t0)*1000},
             }
 
         # --- GUARDRAIL: Validate chunks before LLM call ---
@@ -357,6 +371,7 @@ class RAGEngine:
                     "Run `/index` to rebuild the index."
                 ),
                 "sources": [],
+                "processing": {"backend": _backend(), "chunks": 0, "cache_hit": False, "elapsed_ms": (time.time()-_t0)*1000},
             }
 
         # Token budget check
@@ -371,6 +386,7 @@ class RAGEngine:
             return {
                 "answer": "⚠️ *Context window too full.* Try a more specific question.",
                 "sources": sources,
+                "processing": {"backend": _backend(), "chunks": chunk_count, "cache_hit": False, "elapsed_ms": (time.time()-_t0)*1000},
             }
 
         # --- Phase 2: LLM generation with timeout + fallback ---
@@ -380,18 +396,34 @@ class RAGEngine:
         from app.rag.models import get_llm
         from app.rag.guard import OllamaGuard, OllamaBusyError, OllamaDeadError
 
+        # Select prompt template based on mode
+        if mode == "quiz":
+            from app.rag.prompts import get_quiz_prompt
+            prompt_template = get_quiz_prompt(count=5, difficulty=difficulty)
+            prompt_var = "query_str"
+        elif mode == "summary":
+            from app.rag.prompts import SUMMARY_PROMPT
+            prompt_template = SUMMARY_PROMPT
+            prompt_var = "query_str"
+        else:  # qa
+            prompt_template = None
+            prompt_var = None
+
         try:
             async with OllamaGuard("answer generation", timeout=120) as _guard:
                 llm = get_llm()
                 logger.info("[%s]  [p2] LLM instance: %s", _qid, getattr(llm, 'model', '?'))
 
                 from llama_index.core.response_synthesizers import TreeSummarize
-                synthesizer = TreeSummarize(llm=llm)
+                kwargs = {"llm": llm, "use_async": True}
+                if prompt_template is not None:
+                    kwargs["summary_template"] = prompt_template
+                synthesizer = TreeSummarize(**kwargs)
                 logger.info("[%s]  [p2] TreeSummarize created, calling aget_response()...", _qid)
 
                 _t2 = time.time()
                 response = await asyncio.wait_for(
-                    synthesizer.aget_response(question, chunk_texts),
+                    synthesizer.aget_response(query_str=question, text_chunks=chunk_texts),
                     timeout=30.0,  # HARD CAP: 30s for synthesis
                 )
                 _gen_ms = (time.time()-_t2)*1000
@@ -421,14 +453,18 @@ class RAGEngine:
                 return {
                     "answer": "⚠️ *Query timed out. Try again with a shorter or more specific question.*",
                     "sources": sources,
+                    "processing": {"backend": _backend(), "chunks": chunk_count, "cache_hit": False, "elapsed_ms": (time.time()-_t0)*1000},
                 }
 
         except OllamaBusyError as e:
             logger.error("[%s]  [p2] Ollama BUSY: %s", _qid, e)
-            return {"answer": str(e), "sources": sources}
+            return {"answer": str(e), "sources": sources,
+                   "processing": {"backend": _backend(), "chunks": chunk_count, "cache_hit": False, "elapsed_ms": (time.time()-_t0)*1000}}
         except OllamaDeadError as e:
             logger.error("[%s]  [p2] Ollama DEAD: %s", _qid, e)
-            return {"answer": "⚠️ Study engine unavailable. Try again in 30s.", "sources": sources}
+            return {"answer": "⚠️ Study engine unavailable. Try again in 30s.",
+                   "sources": sources,
+                   "processing": {"backend": _backend(), "chunks": chunk_count, "cache_hit": False, "elapsed_ms": (time.time()-_t0)*1000}}
         except Exception as e:
             logger.error("[%s]  [p2] LLM CRASHED: %s", _qid, e, exc_info=True)
             raise
@@ -443,6 +479,7 @@ class RAGEngine:
                     "`uv sync --extra liteparse`"
                 ),
                 "sources": sources,
+                "processing": {"backend": _backend(), "chunks": chunk_count, "cache_hit": False, "elapsed_ms": (time.time()-_t0)*1000},
             }
 
         # --- Phase 3: Build source citations ---
@@ -514,4 +551,5 @@ class RAGEngine:
         return {
             "answer": answer,
             "sources": sources,
+            "processing": {"backend": _backend(), "chunks": chunk_count, "cache_hit": False, "elapsed_ms": _total_ms},
         }

@@ -18,6 +18,40 @@ _processed_updates: set[int] = set()
 MAX_PROCESSED = 100  # keep last 100 IDs to avoid unbounded memory
 
 
+def _build_status_footer(processing: dict | None = None) -> str:
+    """Build a processing status footer for long-running / resource-heavy operations.
+
+    Appended to query, quiz, and summarize responses.
+    Shows backend (GPU/CPU/Cache), chunk count, and elapsed time.
+    """
+    if not processing:
+        return ""
+
+    backend = processing.get("backend", "")
+    chunks = processing.get("chunks", 0)
+    cache_hit = processing.get("cache_hit", False)
+    elapsed_ms = processing.get("elapsed_ms", 0)
+
+    if cache_hit:
+        elapsed_s = elapsed_ms / 1000
+        return f"\n\n🟢 *Cache hit* · {elapsed_s:.1f}s"
+
+    # Backend emoji
+    backend_map = {
+        "gpu": ("🟢", "GPU"),
+        "cpu": ("🟡", "CPU"),
+        "fallback": ("🟡", "CPU"),
+        "unknown": ("⚪", "—"),
+        "cache": ("🟢", "Cache"),
+    }
+    emoji, label = backend_map.get(backend, ("⚪", backend or "—"))
+
+    elapsed_s = elapsed_ms / 1000
+    if chunks > 0:
+        return f"\n\n{emoji} *{label}* · {chunks} chunks · {elapsed_s:.1f}s"
+    return f"\n\n{emoji} *{label}* · {elapsed_s:.1f}s"
+
+
 async def _send_telegram_message(chat_id: int, text: str, keyboard=None) -> dict | None:
     """Send a message via Telegram Bot API using raw httpx.
     Falls back to plain text if markdown causes 400 error.
@@ -134,18 +168,27 @@ async def webhook(request: Request) -> Response:
         return Response(status_code=200)
 
     # Process — BrainPlugin manages thinking indicators internally for slow ops
+    from app.plugins.base import DispatchResult
     try:
         import asyncio
-        reply = await asyncio.wait_for(dispatch(update, None), timeout=300)
+        result = await asyncio.wait_for(dispatch(update, None), timeout=300)
     except asyncio.TimeoutError:
         logger.error("Dispatch timed out after 300s")
-        reply = "⏳ Processing timed out after 5 minutes.\nTry a simpler or more specific question."
+        result = DispatchResult(reply="⏳ Processing timed out after 5 minutes.\n"
+                               "Try a simpler or more specific question.")
     except Exception as e:
         logger.error("Dispatch failed: %s", e, exc_info=True)
-        reply = "⚠️ Sorry, something went wrong processing your request."
+        result = DispatchResult(reply="⚠️ Sorry, something went wrong processing your request.")
 
-    if reply:
-        await _send_telegram_message(message.chat_id, reply)
+    reply = result.reply if isinstance(result, DispatchResult) else (result if isinstance(result, str) else None)
+    if not reply:
+        return Response(status_code=200)
+    if isinstance(result, DispatchResult) and result.processing:
+        reply = reply + _build_status_footer(result.processing)
+    if not isinstance(reply, str):
+        logger.error("BUG: reply is not a string! type=%s value=%r", type(reply), reply)
+        return Response(status_code=500)
+    await _send_telegram_message(message.chat_id, reply)
 
     return Response(status_code=200)
 

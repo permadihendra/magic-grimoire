@@ -15,6 +15,16 @@ logger = logging.getLogger(__name__)
 _DEFAULT_BATCH_SIZE = DEFAULT_EMBED_BATCH_SIZE  # 10
 _hf_model: BaseEmbedding | None = None
 
+# ── Backend tracking ───────────────────────────────────
+# "gpu" = Ollama nomic-embed-text (default)
+# "cpu" = sentence-transformers all-MiniLM-L6-v2
+_embed_backend: str = "gpu"
+
+
+def get_embed_backend() -> str:
+    """Return the active embed backend: 'gpu' (Ollama) or 'cpu' (sentence-transformers)."""
+    return _embed_backend
+
 
 def _get_hf_embed_model() -> BaseEmbedding:
     """Load the HuggingFace sentence-transformers model (singleton)."""
@@ -95,10 +105,12 @@ class FallbackEmbedding(BaseEmbedding):
         return self.primary_model_name
 
     def _ensure_fallback(self) -> BaseEmbedding:
-        """Load fallback model if not yet loaded. Marks _using_fallback=True."""
+        """Load fallback model if not yet loaded. Marks _using_fallback=True and _embed_backend='cpu'."""
+        global _embed_backend
         if self._fallback is None:
             self._fallback = _get_hf_embed_model()
             self._using_fallback = True
+            _embed_backend = "cpu"  # Track: CPU embed is now active
             logger.warning(
                 "Ollama embed failed — switched to CPU fallback: all-MiniLM-L6-v2. "
                 "Embedding will be slower but indexing will succeed."
