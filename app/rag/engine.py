@@ -92,12 +92,13 @@ class RAGEngine:
 
     # ── Retrieve only (no LLM generation) ─────────────────
 
-    def retrieve_only(self, question: str, document: str | None = None) -> list[dict]:
+    def retrieve_only(self, question: str, document: str | None = None, chat_id: int | None = None) -> list[dict]:
         """Retrieve passages without LLM generation.
 
         Args:
             question: The query.
             document: Optional document name to boost scores for.
+            chat_id: Telegram chat ID for feedback learning.
 
         Returns:
             List of dicts with keys: text, filename, score.
@@ -120,7 +121,35 @@ class RAGEngine:
                     if overlap >= 0.5:
                         boost = 1.0 + (overlap * 1.0)
                         node.score = (node.score or 0) * boost
-            nodes.sort(key=lambda n: n.score or 0, reverse=True)
+
+        # Apply feedback learner adjustments
+        if chat_id is not None:
+            from app.rag.feedback import get_learner
+            learner = get_learner(chat_id)
+            for node in nodes:
+                fname = node.metadata.get("file_name", "")
+                node.score = learner.adjust_score(fname, node.score or 0)
+
+        # Post-retrieval filtering: force named-doc chunks first
+        if document:
+            doc_nodes = []
+            other_nodes = []
+            for node in nodes:
+                fname = node.metadata.get("file_name", "").lower()
+                fname_norm = fname.replace("_", " ").replace(".", " ")
+                fname_words_set = set(fname_norm.split())
+                if doc_words:
+                    overlap2 = len(doc_words & fname_words_set) / len(doc_words)
+                    if overlap2 >= 0.5:
+                        doc_nodes.append(node)
+                        continue
+                other_nodes.append(node)
+            if doc_nodes:
+                forced_count = min(2, len(doc_nodes))
+                remaining = max(0, 5 - forced_count)
+                nodes = doc_nodes[:forced_count] + other_nodes[:remaining]
+
+        nodes.sort(key=lambda n: n.score or 0, reverse=True)
 
         passages = []
         seen_files = set()
@@ -182,6 +211,7 @@ class RAGEngine:
         question: str,
         difficulty: str = "normal",
         document: str | None = None,
+        chat_id: int | None = None,
     ) -> dict[str, Any]:
         """Query and return BOTH answer and source citations.
 
@@ -189,20 +219,24 @@ class RAGEngine:
             question: The user's question.
             difficulty: 'simple', 'normal', or 'advanced'.
             document: Optional document name to boost scores for.
-                      If user mentions a specific doc, pass it here.
+            chat_id: Telegram chat ID for feedback learning.
 
         Returns:
             Dict with 'answer' (str) and 'sources' (list of dicts).
         """
-        # --- Phase 1: Sync retrieval with optional document boosting ---
+        # --- Phase 1: Sync retrieval with document boosting + feedback ---
         retriever = self._get_retriever()
         nodes = retriever.retrieve(question)
 
-        # Document-aware boosting (PLAN #6 + PLAN audit fix: normalize names)
+        # Load feedback learner for this chat (if available)
+        learner = None
+        if chat_id is not None:
+            from app.rag.feedback import get_learner
+            learner = get_learner(chat_id)
+
+        # Document-aware boosting (PLAN #6 + fuzzy matching)
         if document:
-            # Normalize: replace separators with spaces, collapse whitespace
             doc_words = set(document.lower().replace("_", " ").replace(".", " ").split())
-            # Filter out common stopwords
             stopwords = {"a", "an", "the", "and", "or", "but", "for", "nor", "of",
                         "in", "on", "at", "to", "by", "with", "from", "pdf", "epub"}
             doc_words -= stopwords
@@ -211,13 +245,45 @@ class RAGEngine:
                 fname = node.metadata.get("file_name", "").lower()
                 fname_norm = fname.replace("_", " ").replace(".", " ")
                 fname_words = set(fname_norm.split())
-                # How many query words match the filename?
                 if doc_words:
                     overlap = len(doc_words & fname_words) / len(doc_words)
-                    if overlap >= 0.5:  # At least 50% of query words match
-                        boost = 1.0 + (overlap * 1.0)  # 1.5x for 50%, 2.0x for 100%
+                    if overlap >= 0.5:
+                        boost = 1.0 + (overlap * 1.0)
                         node.score = (node.score or 0) * boost
-            nodes.sort(key=lambda n: n.score or 0, reverse=True)
+
+        # Apply feedback learner adjustments (PLAN retrieval quality Phase 2)
+        blocked_docs = set()
+        if learner:
+            blocked_docs = learner.get_blocked_docs()
+            for node in nodes:
+                fname = node.metadata.get("file_name", "")
+                node.score = learner.adjust_score(fname, node.score or 0)
+
+        # Post-retrieval filtering: force named-doc chunks into context
+        # (PLAN retrieval quality Phase 1 — guarantees relevant doc in context)
+        if document:
+            doc_nodes = []
+            other_nodes = []
+            for node in nodes:
+                fname = node.metadata.get("file_name", "").lower()
+                fname_norm = fname.replace("_", " ").replace(".", " ")
+                fname_words_set = set(fname_norm.split())
+                if doc_words:
+                    overlap = len(doc_words & fname_words_set) / len(doc_words)
+                    if overlap >= 0.5:
+                        doc_nodes.append(node)
+                        continue
+                other_nodes.append(node)
+            
+            if doc_nodes:
+                # Guarantee top-2 from named doc, fill rest from others
+                forced_count = min(2, len(doc_nodes))
+                remaining = max(0, 5 - forced_count)
+                nodes = doc_nodes[:forced_count] + other_nodes[:remaining]
+            # If no matching doc nodes found, keep original order
+
+        # Sort final selection by (adjusted) score
+        nodes.sort(key=lambda n: n.score or 0, reverse=True)
 
         # Extract unique sources
         seen_files = set()

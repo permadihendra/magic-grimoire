@@ -460,7 +460,7 @@ class StudyPlugin(Plugin):
 # ── Module-level tool functions (imported by BrainPlugin) ──
 
 
-async def ask_query(query: str, difficulty: str = "normal", document: str | None = None) -> str:
+async def ask_query(query: str, difficulty: str = "normal", document: str | None = None, chat_id: int | None = None) -> str:
     """Query the document index and return the answer with source citations.
 
     Args:
@@ -487,19 +487,20 @@ async def ask_query(query: str, difficulty: str = "normal", document: str | None
             return "📭 No documents indexed yet! Run `/index` first."
 
         logger.info("ask_query: %s (difficulty=%s, document=%s)", query[:100], difficulty, document)
-        result = await _rag_engine.query_with_sources(query, difficulty=difficulty, document=document)
+        result = await _rag_engine.query_with_sources(query, difficulty=difficulty, document=document, chat_id=chat_id)
         return result["answer"]
     except Exception as e:
         logger.error("ask_query failed: %s", e, exc_info=True)
         return f"\u26a0\ufe0f Query failed: {e}"
 
 
-async def retrieve_passages(query: str, document: str | None = None) -> list[dict]:
+async def retrieve_passages(query: str, document: str | None = None, chat_id: int | None = None) -> list[dict]:
     """Retrieve passages without LLM generation.
 
     Args:
         query: Search query.
         document: Optional document name to focus search on.
+        chat_id: Telegram chat ID for feedback learning.
 
     Returns:
         List of dicts with keys: text, filename, score.
@@ -512,7 +513,7 @@ async def retrieve_passages(query: str, document: str | None = None) -> list[dic
     try:
         index = await _doc_indexer.ensure_index()
         _rag_engine.set_index(index)
-        return _rag_engine.retrieve_only(query, document=document)
+        return _rag_engine.retrieve_only(query, document=document, chat_id=chat_id)
     except Exception as e:
         logger.error("retrieve_passages failed: %s", e)
         return []

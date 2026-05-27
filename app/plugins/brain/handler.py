@@ -87,16 +87,41 @@ Available tools:
 - TOOL: chat(text) — Casual conversation. No document needed.
   Use for: greetings, thanks, feedback, casual chat.
 
+- TOOL: feedback(type, detail="") — Process user feedback about retrieval quality.
+  type: "wrong_source" (user says answer came from wrong book) or 
+        "good" (user says answer was helpful/correct) or
+        "reset" (clear all feedback for this session).
+  detail: describe the document involved or the issue.
+  Use for: "that's from the wrong book", "wrong source", "perfect answer",
+  "no, I meant the World Economy book not Finance".
+  After calling feedback with wrong_source, call ask/quiz again with corrected parameters.
+
+- TOOL: retrieve(query, document=None) — Just find passages without generating text.
+  Returns raw passages with filenames and scores. Fast — no LLM generation.
+  Use for: quickly checking what documents cover a topic before asking.
+
 Rules:
 1. CRITICAL: For ask/quiz/summarize tools — do NOT write any conversational text or answers BEFORE the tool. Let the tool produce the complete answer. You may add ONE short line AFTER the tool (a suggestion or follow-up question).
-2. Use conversation context for follow-ups like "tell me more", "explain that".
-3. After the tool output, naturally suggest: a quiz, a related topic, or deeper explanation.
-4. If user seems confused, use difficulty="simple".
-5. If user asks for advanced/detailed content, use difficulty="advanced".
-6. You can chain MULTIPLE tools in one response.
-7. Keep your text minimal — the tools do the heavy lifting.
-8. Respond in the user's language (Indonesian or English).
-9. NOT FOUND HANDLING: If the tool returns empty, "not found", or a very short answer — acknowledge it honestly. Don't pretend you found something. Suggest: different keywords, upload relevant docs, or check /files.
+2. DOCUMENT DETECTION: When the user mentions a book name:
+   - ALWAYS pass it as the document parameter
+   - Match against what list_docs() shows — use partial name matching
+   - "world economy book" → document="World Economy" (not the full EPUB filename)
+   - "finance for normal people" → document="Finance for Normal People"
+   - If unsure which document, use list_docs() first
+3. DOCUMENT CORRECTION: If the user says the answer came from the wrong document:
+   - IMMEDIATELY call feedback(type="wrong_source", detail="<wrong doc name>")
+   - Then retry ask() with the CORRECT document parameter
+   - Example: User says "that's from Finance, not World Economy" →
+     TOOL: feedback(type="wrong_source", detail="Finance for Normal People")
+     TOOL: ask(query="...", document="World Economy")
+4. Use conversation context for follow-ups like "tell me more", "explain that".
+5. After the tool output, naturally suggest: a quiz, a related topic, or deeper explanation.
+6. If user seems confused, use difficulty="simple".
+7. If user asks for advanced/detailed content, use difficulty="advanced".
+8. You can chain MULTIPLE tools in one response.
+9. Keep your text minimal — the tools do the heavy lifting.
+10. Respond in the user's language (Indonesian or English).
+11. NOT FOUND HANDLING: If the tool returns empty, "not found", or a very short answer — acknowledge it honestly. Don't pretend you found something. Suggest: different keywords, upload relevant docs, or check /files.
 
 Format for TOOL lines:
 TOOL: tool_name(param1="value1", param2=123)
@@ -109,6 +134,11 @@ TOOL: list_docs()
 User: "what is loss aversion?"
 You: *(no conversational text before ask — the tool produces the answer)*
 TOOL: ask(query="What is loss aversion?", difficulty="normal")
+
+User: "no, that's from the wrong book. It's from Finance for Normal People not World Economy"
+You: You're right, let me correct that. *(calls feedback to learn, then retries)*
+TOOL: feedback(type="wrong_source", detail="Finance for Normal People")
+TOOL: ask(query="what is loss aversion?", document="World Economy")
 
 User: "explain it simply"
 TOOL: ask(query="What is loss aversion? Explain simply", difficulty="simple")
@@ -150,15 +180,49 @@ def _parse_tool(line: str) -> tuple[str, dict] | None:
 
 
 # ── Tool implementations ──────────────────────────────────
-async def _tool_retrieve(query: str, document: str | None = None) -> list[dict]:
+async def _tool_feedback(type: str, detail: str = "", chat_id: int = 0) -> str:
+    """Process user feedback about retrieval quality.
+
+    Args:
+        type: 'wrong_source' or 'good'.
+        detail: Description or document name referenced.
+        chat_id: Chat ID for session-scoped learning.
+
+    Returns:
+        Confirmation message.
+    """
+    from app.rag.feedback import get_learner
+    learner = get_learner(chat_id)
+
+    if type == "wrong_source":
+        # Extract document name from detail if provided
+        learner.penalize(detail if detail else "unknown", factor=0.3)
+        return (
+            f"Got it! I've noted that '{detail}' was the wrong source. "
+            "I'll avoid it for this session."
+        )
+    elif type == "good":
+        learner.boost(detail if detail else "all", factor=1.5)
+        return (
+            f"Great! I've noted that '{detail}' was helpful. "
+            "I'll prefer it for this session."
+        )
+    elif type == "reset":
+        learner.clear()
+        return "Feedback reset for this session."
+    else:
+        return f"Unknown feedback type: {type}"
+
+
+async def _tool_retrieve(query: str, document: str | None = None, chat_id: int = 0) -> list[dict]:
     """Just retrieve passages without LLM generation.
     Returns list of {text, filename, score}.
     """
     from app.plugins.study.handler import retrieve_passages
-    return await retrieve_passages(query, document=document)
+    return await retrieve_passages(query, document=document, chat_id=chat_id)
 
 
-async def _tool_ask(query: str, difficulty: str = "normal", document: str | None = None) -> str:
+async def _tool_ask(query: str, difficulty: str = "normal", document: str | None = None, chat_id: int | None = None) -> str:
     """Execute the ask() tool — RAG query with source citations.
 
     Args:
@@ -168,7 +232,7 @@ async def _tool_ask(query: str, difficulty: str = "normal", document: str | None
     """
     from app.plugins.study.handler import ask_query
     try:
-        result = await ask_query(query, difficulty=difficulty, document=document)
+        result = await ask_query(query, difficulty=difficulty, document=document, chat_id=chat_id)
         if not result or len(result.strip()) < 20:
             return (
                 "📭 *I searched your documents but couldn't find a good answer.*\n\n"
@@ -325,6 +389,8 @@ _TOOL_REGISTRY = {
     "summarize": _tool_summarize,
     "list_docs": _tool_list_docs,
     "chat": _tool_chat,
+    "retrieve": _tool_retrieve,
+    "feedback": _tool_feedback,
 }
 
 
@@ -414,7 +480,7 @@ class BrainPlugin(Plugin):
                     query = ask_params.get("query", message)
                     document = ask_params.get("document")
 
-                    passages = await _tool_retrieve(query, document=document)
+                    passages = await _tool_retrieve(query, document=document, chat_id=chat_id)
 
                     if passages:
                         short_names = []
@@ -438,6 +504,10 @@ class BrainPlugin(Plugin):
             # Execute tools with error handling + timer
             result_lines = []
             for t_name, t_params in tool_tasks:
+                # Inject chat_id for feedback learning
+                t_params = dict(t_params)
+                t_params.setdefault("chat_id", chat_id)
+
                 tool_fn = _TOOL_REGISTRY.get(t_name)
                 if tool_fn:
                     logger.info("Brain: executing tool '%s' with %s", t_name, t_params)
