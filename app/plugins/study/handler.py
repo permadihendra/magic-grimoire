@@ -33,7 +33,7 @@ _doc_indexer: DocumentIndexer | None = None
 
 class StudyPlugin(Plugin):
     name = "study"
-    commands = ["ask", "quiz", "docs", "index"]
+    commands = ["ask", "quiz", "docs", "index", "files", "delete"]
     description = "RAG study agent — query documents, generate quizzes"
 
     async def on_load(self) -> None:
@@ -87,6 +87,12 @@ class StudyPlugin(Plugin):
 
         if cmd == "/index":
             return await self._handle_index(ctx)
+
+        if cmd == "/files":
+            return await self._handle_files(ctx)
+
+        if cmd == "/delete":
+            return await self._handle_delete(ctx)
 
         # Free text → auto-query with RAG
         return await self._handle_ask(ctx)
@@ -284,6 +290,101 @@ class StudyPlugin(Plugin):
                 "Make sure Ollama is running (`ollama serve`)."
             )
 
+
+    async def _handle_files(self, ctx: BotContext) -> str:
+        """Handle /files — list all files on disk in app/docs/."""
+        import os
+        from datetime import datetime
+
+        docs_dir = settings.docs_dir
+        if not os.path.isdir(docs_dir):
+            return "📁 No files directory found."
+
+        files = []
+        for f in os.listdir(docs_dir):
+            fpath = os.path.join(docs_dir, f)
+            if os.path.isfile(fpath) and not f.startswith("."):
+                size_mb = os.path.getsize(fpath) / (1024 * 1024)
+                modified = datetime.fromtimestamp(os.path.getmtime(fpath))
+                files.append((f, size_mb, modified))
+
+        if not files:
+            return "📭 No files in docs directory."
+
+        # Sort by modification time (newest first)
+        files.sort(key=lambda x: x[2], reverse=True)
+
+        # Check which are indexed
+        from app.database import get_db
+        db = await get_db()
+        indexed_files = set()
+        try:
+            cursor = await db.execute("SELECT filename FROM documents")
+            for row in await cursor.fetchall():
+                indexed_files.add(row["filename"])
+        except Exception:
+            pass
+
+        lines = ["📁 *Files in docs directory*\n"]
+        for fname, size_mb, modified in files:
+            status = "✅ indexed" if fname in indexed_files else "⬜ not indexed"
+            time_str = modified.strftime("%d %b %Y, %H:%M")
+            lines.append(
+                f"📄 `{fname}`\n"
+                f"   └─ {size_mb:.1f} MB · {status} · {time_str}\n"
+            )
+
+        lines.append(f"_Total: {len(files)} files_")
+        return "\n".join(lines)
+
+    async def _handle_delete(self, ctx: BotContext) -> str:
+        """Handle /delete <filename> — delete a file from app/docs/."""
+        import os
+        import glob
+
+        text = ctx.message_text.strip()
+        name = text[len("/delete"):].strip()
+
+        if not name:
+            return (
+                "📝 *Usage:* `/delete <filename>`\n\n"
+                "Delete a file from your study documents.\n"
+                "Use `/files` to see all files.\n\n"
+                "_Note: Run `/index` after deleting to update the index._"
+            )
+
+        docs_dir = settings.docs_dir
+        if not os.path.isdir(docs_dir):
+            return "📁 No files directory found."
+
+        # Search for matching files
+        matches = []
+        for f in os.listdir(docs_dir):
+            if name.lower() in f.lower():
+                matches.append(f)
+
+        if not matches:
+            return f"❌ No files matching `{name}` found. Use `/files` to see available files."
+
+        if len(matches) > 1:
+            match_list = "\n".join(f"  • `{f}`" for f in matches[:10])
+            return (
+                f"⚠️ Multiple files match `{name}`:\n{match_list}\n\n"
+                f"Please be more specific."
+            )
+
+        # Delete the file
+        fpath = os.path.join(docs_dir, matches[0])
+        try:
+            os.remove(fpath)
+            logger.info("Deleted file: %s", fpath)
+            return (
+                f"🗑️ *Deleted:* `{matches[0]}`\n\n"
+                f"Run `/index` to rebuild the index without this file."
+            )
+        except OSError as e:
+            logger.error("Failed to delete %s: %s", fpath, e)
+            return f"⚠️ Failed to delete file: {e}"
 
 # ── Module-level tool functions (imported by BrainPlugin) ──
 
