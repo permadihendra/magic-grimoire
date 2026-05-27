@@ -52,3 +52,44 @@ async def init_db() -> None:
 
     await db.commit()
     logger.info("Database initialized")
+
+
+async def get_document_stats() -> dict:
+    """Get aggregate stats about indexed documents.
+
+    Returns:
+        Dict with keys: docs (count), size_mb (total MB), words (estimated), chunks.
+        Returns zeros if no documents are indexed.
+    """
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT COUNT(*) as doc_count, COALESCE(SUM(file_size), 0) as total_bytes, "
+            "COALESCE(SUM(chunk_count), 0) as total_chunks FROM documents"
+        )
+        row = await cursor.fetchone()
+        if not row or row["doc_count"] == 0:
+            return {"docs": 0, "size_mb": 0, "words": 0, "chunks": 0}
+
+        doc_count = row["doc_count"]
+        total_bytes = row["total_bytes"]
+        total_chunks = row["total_chunks"]
+
+        # Estimate word count: rough heuristic
+        # PDF/EPUB: ~35% text content, ~5 chars per word
+        if total_chunks > 0:
+            # Better estimate from chunk count * chunk size
+            from app.config import settings
+            estimated_words = total_chunks * settings.chunk_size // 5
+        else:
+            estimated_words = int(total_bytes * 0.35 / 5)
+
+        return {
+            "docs": doc_count,
+            "size_mb": round(total_bytes / (1024 * 1024), 1),
+            "words": estimated_words,
+            "chunks": total_chunks,
+        }
+    except Exception as e:
+        logger.warning("get_document_stats failed: %s", e)
+        return {"docs": 0, "size_mb": 0, "words": 0, "chunks": 0}

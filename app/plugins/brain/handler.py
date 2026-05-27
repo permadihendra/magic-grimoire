@@ -355,8 +355,9 @@ class BrainPlugin(Plugin):
 
         # ── 4a. Slow path — send thinking, execute, edit ────
         if is_slow:
-            # Pick appropriate thinking text
             tool_names = [t for t, _ in tool_tasks]
+
+            # Send initial thinking message
             if "ask" in tool_names:
                 thinking_text = "📖 Searching documents for relevant passages..."
             elif "quiz" in tool_names:
@@ -368,6 +369,33 @@ class BrainPlugin(Plugin):
 
             thinking_msg = await _send_telegram_message(chat_id, thinking_text)
             thinking_id = thinking_msg.get("message_id") if thinking_msg else None
+
+            # Commitment: show stats + time estimate for large queries
+            if thinking_id and ("ask" in tool_names or "summarize" in tool_names):
+                try:
+                    from app.database import get_document_stats
+                    stats = await get_document_stats()
+                    if stats and stats["docs"] > 0 and stats["words"] > 20_000:
+                        w = stats["words"]
+                        d = stats["docs"]
+                        if w < 50_000:
+                            estimate = "~1 min"
+                        elif w < 200_000:
+                            estimate = "~2-3 min"
+                        elif w < 500_000:
+                            estimate = "~3-5 min"
+                        elif w < 1_000_000:
+                            estimate = "~5-10 min"
+                        else:
+                            estimate = "~10+ min"
+
+                        await _edit_message(chat_id, thinking_id,
+                            f"📍 Found passages across **{d} documents**\n"
+                            f"📚 Corpus: **{w//1000}K** estimated words\n"
+                            f"⏳ Analyzing and formulating your answer... {estimate}\n\n"
+                            f"I'll notify you as soon as it's ready! ✅")
+                except Exception as e:
+                    logger.debug("Stats/estimate update failed: %s", e)
 
             # Execute tools
             result_lines = []
