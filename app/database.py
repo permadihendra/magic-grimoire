@@ -11,16 +11,50 @@ _db_connection: aiosqlite.Connection | None = None
 
 
 async def get_db() -> aiosqlite.Connection:
-    """Get the shared aiosqlite connection, creating it on first call."""
+    """Get the shared aiosqlite connection, creating it on first call.
+    Auto-recovers from corruption caused by hard crashes."""
     global _db_connection
-    if _db_connection is None:
-        os.makedirs(os.path.dirname(settings.db_path), exist_ok=True)
-        _db_connection = await aiosqlite.connect(settings.db_path)
-        _db_connection.row_factory = aiosqlite.Row
-        await _db_connection.execute("PRAGMA journal_mode=WAL")
-        await _db_connection.execute("PRAGMA foreign_keys=ON")
-        await _db_connection.execute("PRAGMA synchronous=NORMAL")
+    if _db_connection is not None:
+        # Verify existing connection is still healthy
+        try:
+            await _db_connection.execute("SELECT 1")
+            return _db_connection
+        except Exception:
+            logger.warning("DB connection lost — reconnecting")
+            _db_connection = None
+
+    os.makedirs(os.path.dirname(settings.db_path), exist_ok=True)
+    
+    # Check for corruption before connecting
+    if os.path.exists(settings.db_path):
+        import sqlite3
+        try:
+            test = sqlite3.connect(settings.db_path)
+            test.execute("PRAGMA quick_check")
+            test.close()
+        except sqlite3.DatabaseError:
+            logger.error("Database corrupted — recreating from scratch")
+            _recover_db()
+
+    _db_connection = await aiosqlite.connect(settings.db_path)
+    _db_connection.row_factory = aiosqlite.Row
+    await _db_connection.execute("PRAGMA journal_mode=WAL")
+    await _db_connection.execute("PRAGMA foreign_keys=ON")
+    await _db_connection.execute("PRAGMA synchronous=NORMAL")
     return _db_connection
+
+
+def _recover_db() -> None:
+    """Backup corrupted DB and delete it for fresh recreation."""
+    import shutil, time
+    bak = f"{settings.db_path}.corrupted.{int(time.time())}"
+    try:
+        shutil.copy2(settings.db_path, bak)
+        logger.info("Corrupted DB backed up to %s", bak)
+    except Exception:
+        pass
+    os.remove(settings.db_path)
+    logger.info("Corrupted DB deleted — will be recreated on next start")
 
 
 async def init_db() -> None:

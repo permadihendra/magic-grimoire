@@ -312,9 +312,15 @@ class DocumentIndexer:
         return index
 
     async def _sync_documents(self, docs_dir: str, files: list[str]) -> None:
-        """Update the documents table to reflect current files."""
+        """Update the documents table to reflect current files. Corruption-safe."""
         db = await get_db()
-        await db.execute("DELETE FROM documents")
+        try:
+            await db.execute("DELETE FROM documents")
+        except Exception:
+            from app.database import _db_connection
+            _db_connection = None
+            db = await get_db()
+            await db.execute("DELETE FROM documents")
         for fname in files:
             fpath = os.path.join(docs_dir, fname)
             try:
