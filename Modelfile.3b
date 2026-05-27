@@ -6,18 +6,16 @@
 FROM qwen2.5:3b
 
 # ── Memory ───────────────────────────────────────────────
-# 4096 context — KV cache ~0.5 GB (fits easily)
-PARAMETER num_ctx 2048
+PARAMETER num_ctx 1024
 
-# ── GPU ─────────────────────────────────────────────────
-PARAMETER num_gpu 99
+# ── GPU — explicit 1 layer (quantized models = single layer) ─
+PARAMETER num_gpu 1
 PARAMETER num_batch 512
+PARAMETER repeat_penalty 1.1
 
-# ── Generation ──────────────────────────────────────────
-# Deterministic output — facts come from documents
+# ── Generation — deterministic ──────────────────────────
 PARAMETER temperature 0.0
-PARAMETER num_predict 256
-PARAMETER repeat_penalty 1.05
+PARAMETER num_predict 128
 PARAMETER top_k 1
 PARAMETER top_p 1.0
 
@@ -32,3 +30,5 @@ SYSTEM """You are a precise study assistant. When answering from documents:
 4. Cite specific passages when possible
 5. If context does not contain the answer, say so honestly
 6. Do not hallucinate or invent information"""
+
+PARAMETER num_thread 4

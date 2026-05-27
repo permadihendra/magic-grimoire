@@ -235,6 +235,25 @@ class RAGEngine:
         Returns:
             Dict with 'answer' (str) and 'sources' (list of dicts).
         """
+        _qid = f"q_{int(time.time()*1000)%100000:05d}"
+        _t0 = time.time()
+        logger.info("[%s] >>> q_with_sources START q='%s' diff=%s doc=%s",
+                    _qid, question[:60], difficulty, document)
+
+        # --- GUARDRAIL: Index health check ---
+        if self._index:
+            try:
+                doc_count = len(self._index.docstore.docs)
+                if doc_count == 0:
+                    logger.warning("[%s] Index has 0 documents!", _qid)
+                    return {
+                        "answer": "📭 *Index is empty.* Run `/index` to rebuild it.",
+                        "sources": [],
+                    }
+                logger.info("[%s]  index health: %d documents", _qid, doc_count)
+            except Exception as e:
+                logger.warning("[%s]  index health check failed: %s", _qid, e)
+
         # --- Phase 0: Knowledge cache check ---
         if chat_id is not None:
             try:
@@ -325,54 +344,94 @@ class RAGEngine:
                 "sources": [],
             }
 
-        # --- Phase 2: Async LLM generation (tree_summarize) ---
+        # --- GUARDRAIL: Validate chunks before LLM call ---
         chunk_texts = [n.text for n in nodes if n.text]
-        
-        # Log retrieval diagnostics
-        total_tokens = sum(len(t.split()) * 1.3 for t in chunk_texts)
-        logger.info(
-            "Retrieval: %d chunks, ~%d tokens (k=%s, ctx=%s)",
-            len(chunk_texts), int(total_tokens), settings.retrieval_top_k, 2048,
-        )
+        chunk_count = len(chunk_texts)
+
+        if chunk_count == 0:
+            logger.warning("[%s] No chunks retrieved — skipping LLM call", _qid)
+            return {
+                "answer": (
+                    "📭 *No relevant passages found.*\n\n"
+                    "Check that `ebooklib` + `html2text` are installed for EPUB support.\n"
+                    "Run `/index` to rebuild the index."
+                ),
+                "sources": [],
+            }
+
+        # Token budget check
+        total_input_tokens = sum(len(t.split()) * 1.3 for t in chunk_texts)
+        system_prompt_tokens = 250
+        available_for_response = 2048 - total_input_tokens - system_prompt_tokens
+        if total_input_tokens > 1800:
+            logger.warning("[%s] Token budget high: ~%d input + %d system > 2048 ctx",
+                          _qid, int(total_input_tokens), system_prompt_tokens)
+        if available_for_response < 50:
+            logger.error("[%s] Insufficient context headroom: %d tokens", _qid, int(available_for_response))
+            return {
+                "answer": "⚠️ *Context window too full.* Try a more specific question.",
+                "sources": sources,
+            }
+
+        # --- Phase 2: LLM generation with timeout + fallback ---
+        logger.info("[%s]  [p2] LLM START chunks=%d ~%d tokens (headroom=%d)",
+                    _qid, chunk_count, int(total_input_tokens), int(available_for_response))
 
         from app.rag.models import get_llm
         from app.rag.guard import OllamaGuard, OllamaBusyError, OllamaDeadError
 
         try:
-            async with OllamaGuard("answer generation", timeout=120):
+            async with OllamaGuard("answer generation", timeout=120) as _guard:
                 llm = get_llm()
+                logger.info("[%s]  [p2] LLM instance: %s", _qid, getattr(llm, 'model', '?'))
+
                 from llama_index.core.response_synthesizers import TreeSummarize
                 synthesizer = TreeSummarize(llm=llm)
-                response = await synthesizer.aget_response(
-                    question,
-                    chunk_texts,
+                logger.info("[%s]  [p2] TreeSummarize created, calling aget_response()...", _qid)
+
+                _t2 = time.time()
+                response = await asyncio.wait_for(
+                    synthesizer.aget_response(question, chunk_texts),
+                    timeout=30.0,  # HARD CAP: 30s for synthesis
                 )
+                _gen_ms = (time.time()-_t2)*1000
                 answer = str(response)
-        except OllamaBusyError as e:
-            return {
-                "answer": str(e),
-                "sources": sources,
-            }
-        except OllamaDeadError:
-            return {
-                "answer": (
-                    "\u26a0\ufe0f *Study engine unavailable*\n\n"
-                    "Ollama isn't running. It should auto-restart shortly.\n"
-                    "Try again in 30 seconds."
-                ),
-                "sources": sources,
-            }
+                logger.info("[%s]  [p2] LLM DONE %d chars (%.0fms gen, %.0fms total)",
+                            _qid, len(answer), _gen_ms, (time.time()-_t0)*1000)
+
         except asyncio.TimeoutError:
-            return {
-                "answer": (
-                    "\u26a0\ufe0f *Query timed out after 2 minutes*\n\n"
-                    "Try:\n"
-                    "\u2022 A simpler or shorter question\n"
-                    "\u2022 Limiting to one document with `/files`\n"
-                    "\u2022 Running `/index` to optimize the index"
-                ),
-                "sources": sources,
-            }
+            logger.error("[%s]  [p2] TreeSummarize timed out after 30s — fallback to simple prompt", _qid)
+            # Fallback: simple join of top 2 chunks only
+            fallback_context = "\n\n".join(chunk_texts[:2])
+            fallback_prompt = (
+                "Based ONLY on this context, answer the question.\n\n"
+                f"Context: {fallback_context}\\n\\n"
+                f"Question: {question}\\n\\n"
+                f"Answer:"
+            )
+            try:
+                async with OllamaGuard("answer generation fallback", timeout=60) as _guard:
+                    llm = get_llm()
+                    response = await asyncio.wait_for(llm.acomplete(fallback_prompt), timeout=60)
+                    answer = str(response)
+                    answer += "\n\n⚠️ *Response truncated due to timeout. Try a shorter question.*"
+                    logger.info("[%s]  [p2] Fallback OK %d chars", _qid, len(answer))
+            except Exception as e:
+                logger.error("[%s]  [p2] Fallback also failed: %s", _qid, e)
+                return {
+                    "answer": "⚠️ *Query timed out. Try again with a shorter or more specific question.*",
+                    "sources": sources,
+                }
+
+        except OllamaBusyError as e:
+            logger.error("[%s]  [p2] Ollama BUSY: %s", _qid, e)
+            return {"answer": str(e), "sources": sources}
+        except OllamaDeadError as e:
+            logger.error("[%s]  [p2] Ollama DEAD: %s", _qid, e)
+            return {"answer": "⚠️ Study engine unavailable. Try again in 30s.", "sources": sources}
+        except Exception as e:
+            logger.error("[%s]  [p2] LLM CRASHED: %s", _qid, e, exc_info=True)
+            raise
 
         # --- Validate: answer is too short ---
         if len(answer.strip()) < 20:
