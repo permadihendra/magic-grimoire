@@ -59,11 +59,15 @@ def get_embed_model() -> OllamaEmbedding:
             settings.ollama_embed_model,
             settings.ollama_base_url,
         )
-        _embed_model = OllamaEmbedding(
+        ollama_embed = OllamaEmbedding(
             model_name=settings.ollama_embed_model,
             base_url=settings.ollama_base_url,
+            embed_batch_size=3,          # Reduced: was 10 — prevents Go runner OOM during batch embed
             ollama_additional_kwargs={"timeout": settings.ollama_timeout},
         )
+        # Wrap with fallback: if Ollama embed crashes (Go panic), use CPU sentence-transformers
+        from app.rag.embeddings import FallbackEmbedding
+        _embed_model = FallbackEmbedding(primary=ollama_embed)
     return _embed_model
 
 

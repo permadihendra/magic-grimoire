@@ -516,7 +516,21 @@ class DocumentIndexer:
 
         except Exception as e:
             logger.error("Indexing failed: %s", e)
-            raise RuntimeError(f"Indexing failed: {e}")
+            # Detect Ollama embed crash (Go panic = ResponseError with "signal arrived")
+            from ollama._types import ResponseError
+            if isinstance(e, ResponseError) and "signal" in str(e).lower():
+                logger.critical(
+                    "Ollama embed Go runner CRASHED during indexing. "
+                    "This is a known issue when Ollama is under GPU+CPU load during batch embedding. "
+                    "Recommend: use sentence-transformers fallback (already configured). "
+                    "If this persists, reduce chunk_size or switch to CPU-only embedding."
+                )
+                raise RuntimeError(
+                    f"Ollama embed crashed during indexing: {e}\n\n"
+                    "The fallback embedding (sentence-transformers all-MiniLM-L6-v2) should take over. "
+                    "If this message persists after restart, run: uv add sentence-transformers"
+                ) from e
+            raise RuntimeError(f"Indexing failed: {e}") from e
 
         elapsed = time.time() - start
 
