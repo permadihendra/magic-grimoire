@@ -1139,13 +1139,13 @@ name = "magic-grimoire"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "aiosqlite" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "llama-index" },
     { name = "llama-index-embeddings-ollama" },
     { name = "llama-index-llms-ollama" },
     { name = "llama-index-readers-file" },
+    { name = "numpy" },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
     { name = "python-telegram-bot" },
@@ -1165,7 +1165,6 @@ liteparse = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiosqlite", specifier = ">=0.20" },
     { name = "fastapi", specifier = ">=0.111" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "liteparse", marker = "extra == 'liteparse'" },
@@ -1174,6 +1173,7 @@ requires-dist = [
     { name = "llama-index-llms-ollama", specifier = ">=0.5" },
     { name = "llama-index-readers-file", specifier = ">=0.4" },
     { name = "mypy", marker = "extra == 'dev'" },
+    { name = "numpy", specifier = ">=1.26" },
     { name = "pydantic-settings", specifier = ">=2.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
