@@ -42,7 +42,9 @@ def _parse_document_raw(raw_bytes: bytes, fname: str) -> LIDocument | None:
     try:
         from liteparse import LiteParse
 
-        parser = LiteParse(ocr_enabled=True, quiet=True)
+        # Disable OCR by default — most PDFs have text layers.
+        # Install tesseract-ocr + set TESSDATA_PREFIX for OCR support.
+        parser = LiteParse(ocr_enabled=False, quiet=True)
         result = parser.parse(raw_bytes)
         text = result.text.strip()
         if text:

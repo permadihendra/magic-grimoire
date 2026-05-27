@@ -92,6 +92,7 @@ Rules:
 6. You can chain MULTIPLE tools in one response.
 7. Keep your text minimal — the tools do the heavy lifting.
 8. Respond in the user's language (Indonesian or English).
+9. NOT FOUND HANDLING: If the tool returns empty, "not found", or a very short answer — acknowledge it honestly. Don't pretend you found something. Suggest: different keywords, upload relevant docs, or check /files.
 
 Format for TOOL lines:
 TOOL: tool_name(param1="value1", param2=123)
@@ -149,7 +150,18 @@ async def _tool_ask(query: str, difficulty: str = "normal") -> str:
     """Execute the ask() tool — RAG query with source citations."""
     from app.plugins.study.handler import ask_query
     try:
-        return await ask_query(query, difficulty=difficulty)
+        result = await ask_query(query, difficulty=difficulty)
+        # Validate: empty or too-short response
+        if not result or len(result.strip()) < 20:
+            return (
+                "📭 *I searched your documents but couldn't find a good answer.*\n\n"
+                "Suggestions:\n"
+                "• Try different keywords\n"
+                "• Upload more relevant documents\n"
+                "• Use `/files` to check your available docs\n"
+                "• Run `/index` if you recently added files"
+            )
+        return result
     except Exception as e:
         logger.error("ask() failed: %s", e)
         return f"⚠️ Sorry, I couldn't find an answer.\n\nError: {e}"
@@ -373,10 +385,14 @@ class BrainPlugin(Plugin):
             final_reply = f"{conv_text}\n\n{tool_text}" if conv_text else tool_text
 
             if thinking_id:
-                await _edit_message(chat_id, thinking_id, final_reply)
+                ok = await _edit_message(chat_id, thinking_id, final_reply)
+                if not ok:
+                    # Edit failed — send as new message instead
+                    _remember(chat_id, message, final_reply)
+                    return final_reply
 
             _remember(chat_id, message, final_reply)
-            return None  # Already sent — gateway does nothing
+            return None  # Edit succeeded — gateway does nothing
 
         # ── 4b. Fast path — execute directly, return text ───
         result_lines = []

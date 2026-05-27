@@ -216,8 +216,37 @@ class RAGEngine:
                     "score": float(node.score) if node.score else 0.0,
                 })
 
-        # Build answer with source citations appended
+        # Build answer
         answer = str(response)
+
+        # ── Validate: no source nodes found ──────────────
+        if not sources:
+            return {
+                "answer": (
+                    "📭 *No relevant passages found in your documents.*\n\n"
+                    "This could mean:\n"
+                    "• The topic isn't covered in your documents\n"
+                    "• The documents failed to parse correctly\n"
+                    "\n"
+                    "Try:\n"
+                    "• A different question or keywords\n"
+                    "• `/index` to re-index your documents\n"
+                    "• Uploading new material"
+                ),
+                "sources": [],
+            }
+
+        # ── Validate: answer is too short (empty result) ─
+        if len(answer.strip()) < 20:
+            return {
+                "answer": (
+                    "📭 *I couldn't extract a clear answer from your documents.*\n\n"
+                    "This might mean the relevant section wasn't parsed correctly.\n"
+                    "Try `/index` to re-index, or check if LiteParse is installed:\n"
+                    "`uv sync --extra liteparse`"
+                ),
+                "sources": sources,
+            }
 
         # Check confidence — if top source score is low, warn
         top_score = max((s["score"] for s in sources), default=0.0)
