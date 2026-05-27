@@ -64,8 +64,10 @@ As a LIBRARIAN:
 - Recommend relevant documents for the user's questions
 
 Available tools:
-- TOOL: ask(query, difficulty="normal") — Query your study documents.
+- TOOL: ask(query, difficulty="normal", document=None) — Query your study documents.
   difficulty can be "simple", "normal", or "advanced".
+  document: optional document name to focus search on.
+  If the user says "in the [name] book" or "from [name] extract the document name and pass it here.
   The tool output IS the answer (with source citations).
   Do NOT write your own answer before this tool.
 
@@ -146,12 +148,25 @@ def _parse_tool(line: str) -> tuple[str, dict] | None:
 
 
 # ── Tool implementations ──────────────────────────────────
-async def _tool_ask(query: str, difficulty: str = "normal") -> str:
-    """Execute the ask() tool — RAG query with source citations."""
+async def _tool_retrieve(query: str, document: str | None = None) -> list[dict]:
+    """Just retrieve passages without LLM generation.
+    Returns list of {text, filename, score}.
+    """
+    from app.plugins.study.handler import retrieve_passages
+    return await retrieve_passages(query, document=document)
+
+
+async def _tool_ask(query: str, difficulty: str = "normal", document: str | None = None) -> str:
+    """Execute the ask() tool — RAG query with source citations.
+
+    Args:
+        query: The question to answer.
+        difficulty: 'simple', 'normal', or 'advanced'.
+        document: Optional document name to focus search on.
+    """
     from app.plugins.study.handler import ask_query
     try:
-        result = await ask_query(query, difficulty=difficulty)
-        # Validate: empty or too-short response
+        result = await ask_query(query, difficulty=difficulty, document=document)
         if not result or len(result.strip()) < 20:
             return (
                 "📭 *I searched your documents but couldn't find a good answer.*\n\n"
@@ -249,8 +264,25 @@ async def _tool_chat(text: str) -> str:
 
 
 # ── Slow tools (need thinking indicator) ─────────────────
-# These take >5s due to Ollama LLM generation
 _SLOW_TOOLS = {"ask", "quiz", "summarize"}
+
+
+async def _progress_timer(chat_id: int, message_id: int,
+                          label: str = "Processing",
+                          interval: int = 60):
+    """Send 'still working' updates every `interval` seconds.
+    Must be cancelled when main work finishes.
+    """
+    import asyncio
+    elapsed = 0
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            elapsed += interval
+            await _edit_message(chat_id, message_id,
+                f"⏳ Still {label}... ({elapsed}s elapsed)")
+    except asyncio.CancelledError:
+        pass
 
 
 async def _send_telegram_message(chat_id: int, text: str) -> dict | None:
@@ -353,6 +385,8 @@ class BrainPlugin(Plugin):
 
         is_slow = any(t in _SLOW_TOOLS for t, _ in tool_tasks)
 
+        is_slow = any(t in _SLOW_TOOLS for t, _ in tool_tasks)
+
         # ── 4a. Slow path — send thinking, execute, edit ────
         if is_slow:
             tool_names = [t for t, _ in tool_tasks]
@@ -370,39 +404,49 @@ class BrainPlugin(Plugin):
             thinking_msg = await _send_telegram_message(chat_id, thinking_text)
             thinking_id = thinking_msg.get("message_id") if thinking_msg else None
 
-            # Commitment: show stats + time estimate for large queries
-            if thinking_id and ("ask" in tool_names or "summarize" in tool_names):
+            # For ask: Phase 1 — retrieve first (fast), show results
+            if "ask" in tool_names and thinking_id:
                 try:
-                    from app.database import get_document_stats
-                    stats = await get_document_stats()
-                    if stats and stats["docs"] > 0 and stats["words"] > 20_000:
-                        w = stats["words"]
-                        d = stats["docs"]
-                        if w < 50_000:
-                            estimate = "~1 min"
-                        elif w < 200_000:
-                            estimate = "~2-3 min"
-                        elif w < 500_000:
-                            estimate = "~3-5 min"
-                        elif w < 1_000_000:
-                            estimate = "~5-10 min"
-                        else:
-                            estimate = "~10+ min"
+                    ask_params = next((p for n, p in tool_tasks if n == "ask"), {})
+                    query = ask_params.get("query", message)
+                    document = ask_params.get("document")
 
-                        await _edit_message(chat_id, thinking_id,
-                            f"📍 Found passages across **{d} documents**\n"
-                            f"📚 Corpus: **{w//1000}K** estimated words\n"
-                            f"⏳ Analyzing and formulating your answer... {estimate}\n\n"
-                            f"I'll notify you as soon as it's ready! ✅")
+                    passages = await _tool_retrieve(query, document=document)
+
+                    if passages:
+                        short_names = []
+                        seen = set()
+                        for p in passages[:3]:
+                            from app.rag.engine import shorten_filename
+                            sn = shorten_filename(p["filename"])
+                            if sn not in seen:
+                                seen.add(sn)
+                                short_names.append(f"{sn} ({p['score']:.2f})")
+
+                        lines = ["🔍 *Retrieved passages:*\n"]
+                        for s in short_names:
+                            lines.append(f"\u2022 {s}")
+                        lines.append("")
+                        lines.append("🧠 Generating answer from retrieved passages...")
+                        await _edit_message(chat_id, thinking_id, "\n".join(lines))
                 except Exception as e:
-                    logger.debug("Stats/estimate update failed: %s", e)
+                    logger.debug("Retrieve preview failed: %s", e)
 
-            # Execute tools with error handling
+            # Execute tools with error handling + timer
             result_lines = []
             for t_name, t_params in tool_tasks:
                 tool_fn = _TOOL_REGISTRY.get(t_name)
                 if tool_fn:
                     logger.info("Brain: executing tool '%s' with %s", t_name, t_params)
+
+                    timer = None
+                    if "ask" in tool_names or "quiz" in tool_names:
+                        import asyncio
+                        timer = asyncio.create_task(
+                            _progress_timer(chat_id, thinking_id,
+                                            label="generating", interval=60)
+                        )
+
                     try:
                         result = await tool_fn(**t_params)
                         result_lines.append(result)
@@ -420,6 +464,9 @@ class BrainPlugin(Plugin):
                             await _edit_message(chat_id, thinking_id, error_msg)
                         _remember(chat_id, message, error_msg)
                         return None
+                    finally:
+                        if timer:
+                            timer.cancel()
                 else:
                     result_lines.append(f"⚠️ Unknown tool: {t_name}")
 
@@ -436,7 +483,7 @@ class BrainPlugin(Plugin):
             _remember(chat_id, message, final_reply)
             return None
 
-        # ── 4b. Fast path — execute directly, return text ───
+                # ── 4b. Fast path — execute directly, return text ───
         result_lines = []
         for t_name, t_params in tool_tasks:
             tool_fn = _TOOL_REGISTRY.get(t_name)

@@ -250,22 +250,66 @@ class StudyPlugin(Plugin):
                 "Place your study documents there first."
             )
 
-        await self._progress(
-            ctx,
-            f"📚 *Indexing {len(files)} documents...*\n\n"
-            "This may take 30-60s for the first run.\n"
-            "I'll update you as it progresses!",
-        )
-
         logger.info("Rebuilding index with %d files...", len(files))
+
+        # Send initial progress message
+        import httpx
+        token = settings.telegram_token
+        chat_id = ctx.chat_id
+        send_url = f"https://api.telegram.org/bot{token}/sendMessage"
+        edit_url = f"https://api.telegram.org/bot{token}/editMessageText"
+
+        async def _send(text: str) -> int | None:
+            """Send a new message, return message_id."""
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    r = await client.post(send_url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
+                    if r.status_code == 200:
+                        return r.json().get("result", {}).get("message_id")
+            except Exception:
+                pass
+            return None
+
+        async def _edit(msg_id: int, text: str):
+            """Edit an existing message."""
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    r = await client.post(edit_url, json={"chat_id": chat_id, "message_id": msg_id, "text": text, "parse_mode": "Markdown"})
+                    if r.status_code == 400:
+                        await client.post(edit_url, json={"chat_id": chat_id, "message_id": msg_id, "text": text})
+            except Exception:
+                pass
+
+        msg_id = await _send(f"📚 *Indexing {len(files)} documents...*")
 
         try:
             t0 = time.time()
 
-            # Phase 1: Loading
-            await self._progress(ctx, "📖 Loading documents...")
-            index = await _doc_indexer.rebuild_index()
-            _rag_engine.set_index(index)
+            # Phase 1: Parsing + indexing (the heavy work)
+            if msg_id:
+                await _edit(msg_id, "📖 Parsing and indexing documents...")
+
+            # Start timer for long operations
+            import asyncio
+            timer_task = None
+            if msg_id:
+                async def _index_timer():
+                    elapsed = 0
+                    try:
+                        while True:
+                            await asyncio.sleep(30)
+                            elapsed += 30
+                            await _edit(msg_id, f"⏳ Still indexing... ({elapsed}s elapsed)")
+                    except asyncio.CancelledError:
+                        pass
+                timer_task = asyncio.create_task(_index_timer())
+
+            try:
+                index = await _doc_indexer.rebuild_index()
+                _rag_engine.set_index(index)
+            finally:
+                if timer_task:
+                    timer_task.cancel()
 
             elapsed = time.time() - t0
 
@@ -276,19 +320,29 @@ class StudyPlugin(Plugin):
             total_chunks = row["total"] if row and row["total"] else "?"
 
             file_list = "\n".join(f"  📄 `{f}`" for f in files)
-            return (
+            result = (
                 f"✅ *Index rebuilt!* ({elapsed:.0f}s)\n\n"
                 f"Indexed `{len(files)}` documents with ~{total_chunks} chunks:\n"
                 f"{file_list}\n\n"
                 f"Now try `/ask` or `/quiz` to study!"
             )
+
+            if msg_id:
+                await _edit(msg_id, result)
+                return None  # Already sent
+            return result
+
         except Exception as e:
             logger.error("Index rebuild failed: %s", e, exc_info=True)
-            return (
+            error_msg = (
                 f"⚠️ *Index rebuild failed:*\n"
                 f"`{str(e)[:300]}`\n\n"
                 "Make sure Ollama is running (`ollama serve`)."
             )
+            if msg_id:
+                await _edit(msg_id, error_msg)
+                return None
+            return error_msg
 
 
     async def _handle_files(self, ctx: BotContext) -> str:
@@ -406,25 +460,25 @@ class StudyPlugin(Plugin):
 # ── Module-level tool functions (imported by BrainPlugin) ──
 
 
-async def ask_query(query: str, difficulty: str = "normal") -> str:
+async def ask_query(query: str, difficulty: str = "normal", document: str | None = None) -> str:
     """Query the document index and return the answer with source citations.
 
     Args:
         query: Natural language question.
         difficulty: 'simple', 'normal', or 'advanced'.
+        document: Optional document name to focus search on.
 
     Used by BrainPlugin's ask() tool.
     """
     global _rag_engine, _doc_indexer
 
     if _rag_engine is None or _doc_indexer is None:
-        return "⚠️ RAG engine not initialized. Restart the bot."
+        return "\u26a0\ufe0f RAG engine not initialized. Restart the bot."
 
     try:
         index = await _doc_indexer.ensure_index()
         _rag_engine.set_index(index)
 
-        # Check if we have documents
         from app.database import get_db
         db = await get_db()
         cursor = await db.execute("SELECT COUNT(*) as cnt FROM documents")
@@ -432,12 +486,36 @@ async def ask_query(query: str, difficulty: str = "normal") -> str:
         if not row or row["cnt"] == 0:
             return "📭 No documents indexed yet! Run `/index` first."
 
-        logger.info("ask_query: %s (difficulty=%s)", query[:100], difficulty)
-        result = await _rag_engine.query_with_sources(query, difficulty=difficulty)
+        logger.info("ask_query: %s (difficulty=%s, document=%s)", query[:100], difficulty, document)
+        result = await _rag_engine.query_with_sources(query, difficulty=difficulty, document=document)
         return result["answer"]
     except Exception as e:
         logger.error("ask_query failed: %s", e, exc_info=True)
-        return f"⚠️ Query failed: {e}"
+        return f"\u26a0\ufe0f Query failed: {e}"
+
+
+async def retrieve_passages(query: str, document: str | None = None) -> list[dict]:
+    """Retrieve passages without LLM generation.
+
+    Args:
+        query: Search query.
+        document: Optional document name to focus search on.
+
+    Returns:
+        List of dicts with keys: text, filename, score.
+    """
+    global _rag_engine, _doc_indexer
+
+    if _rag_engine is None or _doc_indexer is None:
+        return []
+
+    try:
+        index = await _doc_indexer.ensure_index()
+        _rag_engine.set_index(index)
+        return _rag_engine.retrieve_only(query, document=document)
+    except Exception as e:
+        logger.error("retrieve_passages failed: %s", e)
+        return []
 
 
 async def generate_quiz(topic: str, count: int = 5, difficulty: str = "normal") -> str:

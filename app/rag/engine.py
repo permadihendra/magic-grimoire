@@ -1,10 +1,11 @@
 """RAG query engine — retrieve relevant chunks and generate answers.
 
-Uses the VectorStoreIndex to find relevant document chunks, then
-sends them as context to the Ollama LLM for answer generation.
-Supports difficulty levels and source citations.
-
-Note: Uses sync retrieval (async retrieval hangs in current LlamaIndex version).
+Supports:
+- Document-aware retrieval (boost scores for named documents)
+- Difficulty levels (simple/normal/advanced)
+- Source citations with score indicators
+- Retrieve-only mode (no LLM generation)
+- Sync retrieval (async retrieval hangs in current LlamaIndex)
 """
 
 import logging
@@ -27,7 +28,7 @@ _MAX_SOURCES = 3
 
 
 def shorten_filename(filename: str) -> str:
-    # ... keep existing implementation ...
+    """Transform ugly filenames into clean, readable book titles."""
     name = filename.rsplit(".", 1)[0] if "." in filename else filename
     name = name.replace(":Zone.Identifier", "")
     name = re.sub(r"^[^\-]+,\s*[^\-]+\s*[-–]\s*", "", name)
@@ -67,32 +68,65 @@ def shorten_filename(filename: str) -> str:
 
 
 class RAGEngine:
-    """High-level RAG query interface.
-
-    Wraps LlamaIndex's index with manual sync retrieval + LLM generation.
-    Avoids async retrieval which hangs in current LlamaIndex version.
-    """
+    """High-level RAG query interface."""
 
     def __init__(self, index: VectorStoreIndex | None = None) -> None:
         self._index = index
         self._retriever: VectorIndexRetriever | None = None
 
     def set_index(self, index: VectorStoreIndex) -> None:
-        """Set or update the underlying index."""
         self._index = index
         self._retriever = None
 
     def _get_retriever(self) -> VectorIndexRetriever:
-        """Get or create the sync retriever."""
         if self._retriever is not None:
             return self._retriever
         if self._index is None:
-            raise RuntimeError("No index available — index some documents first")
+            raise RuntimeError("No index available")
         self._retriever = VectorIndexRetriever(
             index=self._index,
             similarity_top_k=settings.retrieval_top_k,
         )
         return self._retriever
+
+    # ── Retrieve only (no LLM generation) ─────────────────
+
+    def retrieve_only(self, question: str, document: str | None = None) -> list[dict]:
+        """Retrieve passages without LLM generation.
+
+        Args:
+            question: The query.
+            document: Optional document name to boost scores for.
+
+        Returns:
+            List of dicts with keys: text, filename, score.
+        """
+        retriever = self._get_retriever()
+        nodes = retriever.retrieve(question)
+
+        # Apply document boosting
+        if document:
+            doc_lower = document.lower()
+            for node in nodes:
+                fname = node.metadata.get("file_name", "").lower()
+                if doc_lower in fname:
+                    node.score = (node.score or 0) * 1.5
+            nodes.sort(key=lambda n: n.score or 0, reverse=True)
+
+        passages = []
+        seen_files = set()
+        for node in nodes:
+            fname = node.metadata.get("file_name", "Unknown")
+            if fname not in seen_files or True:
+                # Allow multiple from same doc
+                passages.append({
+                    "text": node.text or "",
+                    "filename": fname,
+                    "score": float(node.score) if node.score else 0.0,
+                })
+        return passages
+
+    # ── Legacy query (no sources) ─────────────────────────
 
     async def query(
         self,
@@ -102,10 +136,8 @@ class RAGEngine:
         count: int = 5,
     ) -> str:
         """Query the index and return the answer."""
-        # Use sync retrieve (async hangs in current LlamaIndex)
         retriever = self._get_retriever()
         nodes = retriever.retrieve(question)
-
         context = "\n\n".join(n.text for n in nodes if n.text)
 
         if mode == "quiz":
@@ -121,18 +153,37 @@ class RAGEngine:
         response = await llm.acomplete(full_prompt)
         return str(response)
 
+    # ── Query with sources + document boosting ────────────
+
     async def query_with_sources(
         self,
         question: str,
         difficulty: str = "normal",
+        document: str | None = None,
     ) -> dict[str, Any]:
         """Query and return BOTH answer and source citations.
 
-        Uses sync retrieval + async LLM generation for reliability.
+        Args:
+            question: The user's question.
+            difficulty: 'simple', 'normal', or 'advanced'.
+            document: Optional document name to boost scores for.
+                      If user mentions a specific doc, pass it here.
+
+        Returns:
+            Dict with 'answer' (str) and 'sources' (list of dicts).
         """
-        # --- Phase 1: Sync retrieval (reliable) ---
+        # --- Phase 1: Sync retrieval with optional document boosting ---
         retriever = self._get_retriever()
         nodes = retriever.retrieve(question)
+
+        # Document-aware boosting
+        if document:
+            doc_lower = document.lower()
+            for node in nodes:
+                fname = node.metadata.get("file_name", "").lower()
+                if doc_lower in fname:
+                    node.score = (node.score or 0) * 1.5
+            nodes.sort(key=lambda n: n.score or 0, reverse=True)
 
         # Extract unique sources
         seen_files = set()
