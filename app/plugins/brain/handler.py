@@ -455,14 +455,18 @@ class BrainPlugin(Plugin):
                         result_lines.append(result)
                     except Exception as e:
                         logger.error("Tool '%s' failed: %s", t_name, e, exc_info=True)
-                        error_msg = (
-                            "⚠️ *Sorry, the analysis failed.*\n\n"
-                            f"Error: `{e}`\n\n"
-                            "Suggestions:\n"
-                            "• Try a simpler or more specific question\n"
-                            "• Check that Ollama is running (`ollama serve`)\n"
-                            "• Run `/index` to rebuild the index"
-                        )
+                        from app.rag.guard import OllamaBusyError, OllamaDeadError
+                        if isinstance(e, (OllamaBusyError, OllamaDeadError)):
+                            error_msg = str(e)
+                        else:
+                            error_msg = (
+                                "⚠️ *Sorry, the analysis failed.*\n\n"
+                                f"Error: `{e}`\n\n"
+                                "Suggestions:\n"
+                                "• Try a simpler or more specific question\n"
+                                "• Check that Ollama is running (`ollama serve`)\n"
+                                "• Run `/index` to rebuild the index"
+                            )
                         if thinking_id:
                             await _edit_message(chat_id, thinking_id, error_msg)
                         _remember(chat_id, message, error_msg)

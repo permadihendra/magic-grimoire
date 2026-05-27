@@ -102,13 +102,15 @@ async def warm_up(progress_callback=None) -> None:
     try:
         # Send a minimal chat to force model loading
         import ollama
+        from app.rag.guard import OllamaGuard
 
-        client = ollama.AsyncClient(host=settings.ollama_base_url)
-        await client.chat(
-            model=settings.ollama_llm_model,
-            messages=[{"role": "user", "content": "Say OK"}],
-            options={"num_predict": 2},  # generate just 2 tokens
-        )
+        async with OllamaGuard("model warm-up", timeout=60, require_health=False):
+            client = ollama.AsyncClient(host=settings.ollama_base_url)
+            await client.chat(
+                model=settings.ollama_llm_model,
+                messages=[{"role": "user", "content": "Say OK"}],
+                options={"num_predict": 2},  # generate just 2 tokens
+            )
         _warmed_up = True
         logger.info("Model %s warmed up successfully", settings.ollama_llm_model)
         if progress_callback:

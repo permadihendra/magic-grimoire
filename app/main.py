@@ -23,6 +23,21 @@ async def lifespan(app: FastAPI):
     """Application lifespan — startup and shutdown."""
     await init_db()
 
+    # Verify Ollama + required models on startup
+    from app.rag.guard import verify_ollama_on_startup
+    health = await verify_ollama_on_startup()
+    if not health["ok"]:
+        logger.error(
+            "Ollama startup check FAILED: %s (models: %s)",
+            health.get("error"), health.get("models"),
+        )
+        logger.warning(
+            "Bot will start but RAG features will be unavailable. "
+            "Run: ollama serve && ollama pull qwen2.5:7b && ollama pull nomic-embed-text"
+        )
+    else:
+        logger.info("Ollama healthy: models=%s", health["models"])
+
     # Load plugins — BrainPlugin MUST be registered before StudyPlugin
     # because Dispatcher routes free text to BrainPlugin first
     registry = PluginRegistry.get()

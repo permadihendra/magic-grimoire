@@ -203,8 +203,58 @@ class DocumentIndexer:
             return index
 
         logger.info("Parsed %d/%d documents successfully", len(documents), len(files))
-        index = VectorStoreIndex.from_documents(documents, show_progress=True)
-        index.storage_context.persist(persist_dir=INDEX_STORAGE_DIR)
+
+        # Guard: batch embedding to avoid VRAM spikes
+        BATCH_SIZE = 50
+        all_nodes = []
+
+        import asyncio as _asyncio
+        from app.rag.guard import OllamaGuard, OllamaBusyError, OllamaDeadError
+
+        logger.info("Embedding %d documents in batches of %d...", len(documents), BATCH_SIZE)
+
+        try:
+            async with OllamaGuard("document indexing", timeout=600):
+                if len(documents) <= BATCH_SIZE:
+                    # Small batch — index all at once
+                    index = VectorStoreIndex.from_documents(documents, show_progress=True)
+                else:
+                    # Large batch — index in chunks, then merge
+                    for i in range(0, len(documents), BATCH_SIZE):
+                        batch = documents[i:i+BATCH_SIZE]
+                        logger.info(
+                            "Indexing batch %d/%d (%d docs)...",
+                            i//BATCH_SIZE + 1,
+                            (len(documents) + BATCH_SIZE - 1)//BATCH_SIZE,
+                            len(batch),
+                        )
+                        batch_index = VectorStoreIndex.from_documents(
+                            batch, show_progress=True
+                        )
+                        all_nodes.extend(batch_index.docstore.docs.values())
+
+                    # Rebuild index from all nodes
+                    index = VectorStoreIndex(
+                        nodes=all_nodes,
+                        embed_model=batch_index._embed_model if all_nodes else None,
+                    )
+
+            index.storage_context.persist(persist_dir=INDEX_STORAGE_DIR)
+
+        except OllamaBusyError:
+            logger.error("Indexing blocked: another operation in progress")
+            raise RuntimeError(
+                "Another study operation is in progress. "
+                "Wait for it to finish, then run /index again."
+            )
+        except OllamaDeadError:
+            raise RuntimeError(
+                "Ollama isn't running. Start it with 'ollama serve', then run /index."
+            )
+        except _asyncio.TimeoutError:
+            raise RuntimeError(
+                "Indexing timed out (10 minutes). Try with fewer documents."
+            )
 
         elapsed = time.time() - start
         logger.info("Indexed %d documents in %.1fs", len(files), elapsed)

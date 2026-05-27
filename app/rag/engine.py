@@ -8,6 +8,7 @@ Supports:
 - Sync retrieval (async retrieval hangs in current LlamaIndex)
 """
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -156,10 +157,23 @@ class RAGEngine:
             prompt_template = get_qa_prompt(difficulty)
 
         from app.rag.models import get_llm
-        llm = get_llm()
+        from app.rag.guard import OllamaGuard, OllamaBusyError, OllamaDeadError
+
         full_prompt = f"{prompt_template}\n\nContext:\n{context}\n\nQuestion: {question}"
-        response = await llm.acomplete(full_prompt)
-        return str(response)
+
+        try:
+            async with OllamaGuard("question answering", timeout=120):
+                llm = get_llm()
+                response = await asyncio.wait_for(
+                    llm.acomplete(full_prompt), timeout=120
+                )
+                return str(response)
+        except OllamaBusyError as e:
+            return str(e)
+        except OllamaDeadError:
+            return "\u26a0\ufe0f Study engine unavailable. It should auto-restart. Try again in 30s."
+        except asyncio.TimeoutError:
+            return "\u26a0\ufe0f Query timed out. Try a simpler question."
 
     # ── Query with sources + document boosting ────────────
 
@@ -239,9 +253,40 @@ class RAGEngine:
         full_prompt = f"{prompt}\n\nContext:\n{context}\n\nQuestion: {question}"
 
         from app.rag.models import get_llm
-        llm = get_llm()
-        response = await llm.acomplete(full_prompt)
-        answer = str(response)
+        from app.rag.guard import OllamaGuard, OllamaBusyError, OllamaDeadError
+
+        try:
+            async with OllamaGuard("answer generation", timeout=120):
+                llm = get_llm()
+                response = await asyncio.wait_for(
+                    llm.acomplete(full_prompt), timeout=120
+                )
+                answer = str(response)
+        except OllamaBusyError as e:
+            return {
+                "answer": str(e),
+                "sources": sources,
+            }
+        except OllamaDeadError:
+            return {
+                "answer": (
+                    "\u26a0\ufe0f *Study engine unavailable*\n\n"
+                    "Ollama isn't running. It should auto-restart shortly.\n"
+                    "Try again in 30 seconds."
+                ),
+                "sources": sources,
+            }
+        except asyncio.TimeoutError:
+            return {
+                "answer": (
+                    "\u26a0\ufe0f *Query timed out after 2 minutes*\n\n"
+                    "Try:\n"
+                    "\u2022 A simpler or shorter question\n"
+                    "\u2022 Limiting to one document with `/files`\n"
+                    "\u2022 Running `/index` to optimize the index"
+                ),
+                "sources": sources,
+            }
 
         # --- Validate: answer is too short ---
         if len(answer.strip()) < 20:
