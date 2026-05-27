@@ -24,6 +24,7 @@ dev = [
     "ruff",
     "mypy",
 ]
+liteparse = ["liteparse"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["app/"]

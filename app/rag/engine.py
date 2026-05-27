@@ -219,6 +219,10 @@ class RAGEngine:
         # Build answer with source citations appended
         answer = str(response)
 
+        # Check confidence — if top source score is low, warn
+        top_score = max((s["score"] for s in sources), default=0.0)
+        low_confidence = top_score < 0.7
+
         # Deduplicate sources for the citation block
         cited = []
         seen_cited = set()
@@ -234,8 +238,20 @@ class RAGEngine:
                 short = shorten_filename(s["filename"])
                 if short not in seen:
                     seen.add(short)
-                    citations.append(f"📖 *Source:* {short}")
+                    # Add confidence indicator
+                    if s["score"] < 0.7:
+                        citations.append(f"📖 *Source:* {short} ⚠️ low relevance")
+                    else:
+                        citations.append(f"📖 *Source:* {short}")
             answer += "\n\n" + "\n".join(citations)
+
+        # Append low-confidence warning if ALL sources are weak
+        if low_confidence and cited:
+            answer += (
+                "\n\n⚠️ *Low confidence* — your documents may not cover "
+                "this topic well. Try a different question or upload "
+                "relevant material."
+            )
 
         return {
             "answer": answer,

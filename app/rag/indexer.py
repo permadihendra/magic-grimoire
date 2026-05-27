@@ -2,6 +2,9 @@
 
 Documents placed in the configured docs_dir are indexed into a
 LlamaIndex VectorStoreIndex and persisted to disk for fast loading.
+
+Uses LiteParse for high-quality parsing (spatial text + OCR + EPUB).
+Falls back to SimpleDirectoryReader if LiteParse is not available.
 """
 
 import logging
@@ -11,6 +14,7 @@ import time
 from llama_index.core import SimpleDirectoryReader, VectorStoreIndex
 from llama_index.core.storage import StorageContext
 from llama_index.core import load_index_from_storage
+from llama_index.core import Document as LIDocument
 
 from app.config import settings
 from app.database import get_db
@@ -22,6 +26,67 @@ logger = logging.getLogger(__name__)
 INDEX_STORAGE_DIR = os.path.join(
     os.path.dirname(settings.db_path), "index_storage"
 )
+
+
+# ── Parser: LiteParse with fallback ──────────────────────
+
+
+def _parse_document_raw(raw_bytes: bytes, fname: str) -> LIDocument | None:
+    """Parse a document from raw bytes.
+
+    Tries LiteParse first (spatial text + OCR + EPUB support).
+    Falls back to SimpleDirectoryReader if LiteParse unavailable.
+    Returns a LlamaIndex Document or None on failure.
+    """
+    # Try 1: LiteParse
+    try:
+        from liteparse import LiteParse
+
+        parser = LiteParse(ocr_enabled=True, quiet=True)
+        result = parser.parse(raw_bytes)
+        text = result.text.strip()
+        if text:
+            logger.info("LiteParse parsed: %s (%d chars)", fname, len(text))
+            return LIDocument(text=text, metadata={"file_name": fname})
+        else:
+            logger.warning("LiteParse returned empty text for %s", fname)
+    except ImportError:
+        logger.debug("LiteParse not installed, using fallback")
+    except Exception as e:
+        logger.warning("LiteParse failed for %s: %s", fname, e)
+
+    # Try 2: SimpleDirectoryReader (reads from file path)
+    # Write bytes to temp file for SimpleDirectoryReader
+    import tempfile
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            suffix=os.path.splitext(fname)[1], delete=False
+        ) as tmp:
+            tmp.write(raw_bytes)
+            tmp_path = tmp.name
+
+        reader = SimpleDirectoryReader(input_files=[tmp_path])
+        docs = reader.load_data()
+
+        # Update metadata with original filename
+        for d in docs:
+            d.metadata["file_name"] = fname
+
+        os.unlink(tmp_path)
+
+        if docs and docs[0].text and docs[0].text.strip():
+            logger.info("Fallback parsed: %s (%d chars)", fname, len(docs[0].text))
+            return docs[0]
+        else:
+            logger.warning("Fallback returned empty for %s", fname)
+    except Exception as e:
+        logger.warning("Fallback parser failed for %s: %s", fname, e)
+
+    return None
+
+
+# ── DocumentIndexer ──────────────────────────────────────
 
 
 class DocumentIndexer:
@@ -55,7 +120,6 @@ class DocumentIndexer:
                 return self._index
             except Exception as e:
                 logger.warning("Failed to load existing index: %s", e)
-                # Fall through to rebuild
 
         # Build fresh index
         docs_dir = settings.docs_dir
@@ -73,9 +137,7 @@ class DocumentIndexer:
         docs_dir = settings.docs_dir
         if not os.path.isdir(docs_dir):
             os.makedirs(docs_dir, exist_ok=True)
-            logger.info("Created docs directory: %s", docs_dir)
 
-        # Remove old index if exists
         if os.path.exists(INDEX_STORAGE_DIR):
             import shutil
             shutil.rmtree(INDEX_STORAGE_DIR)
@@ -86,7 +148,6 @@ class DocumentIndexer:
 
     async def _build_index(self, docs_dir: str) -> VectorStoreIndex:
         """Build a new index from documents in the given directory."""
-        # Supported document extensions
         SUPPORTED_EXTS = {
             ".pdf", ".txt", ".md", ".docx", ".doc",
             ".epub", ".rtf", ".csv", ".json", ".xml",
@@ -113,31 +174,44 @@ class DocumentIndexer:
         start = time.time()
         logger.info("Indexing %d documents from %s...", len(files), docs_dir)
 
-        # Explicitly pass only valid document file paths
-        file_paths = [os.path.join(docs_dir, f) for f in files]
-        documents = SimpleDirectoryReader(
-            input_files=file_paths,
-            filename_as_id=True,
-            file_metadata=lambda fn: {"file_name": os.path.basename(fn)},
-        ).load_data()
+        # Parse each file using LiteParse (or fallback)
+        documents = []
+        for fname in files:
+            fpath = os.path.join(docs_dir, fname)
+            try:
+                with open(fpath, "rb") as f:
+                    raw_bytes = f.read()
+                doc = _parse_document_raw(raw_bytes, fname)
+                if doc:
+                    documents.append(doc)
+                else:
+                    logger.warning("Skipping unparseable file: %s", fname)
+            except Exception as e:
+                logger.warning("Failed to read %s: %s", fname, e)
 
-        # Filter out any empty docs
-        documents = [d for d in documents if d.text and d.text.strip()]
+        if not documents:
+            logger.error("No documents could be parsed!")
+            from llama_index.core import Document
+            dummy = Document(text="")
+            index = VectorStoreIndex.from_documents([dummy])
+            index.storage_context.persist(persist_dir=INDEX_STORAGE_DIR)
+            self._index = index
+            await self._sync_documents(docs_dir, files)
+            return index
+
+        logger.info("Parsed %d/%d documents successfully", len(documents), len(files))
         index = VectorStoreIndex.from_documents(documents, show_progress=True)
         index.storage_context.persist(persist_dir=INDEX_STORAGE_DIR)
 
         elapsed = time.time() - start
         logger.info("Indexed %d documents in %.1fs", len(files), elapsed)
 
-        # Track in SQLite
         await self._sync_documents(docs_dir, files)
-
         return index
 
     async def _sync_documents(self, docs_dir: str, files: list[str]) -> None:
         """Update the documents table to reflect current files."""
         db = await get_db()
-        # Clear old entries
         await db.execute("DELETE FROM documents")
         for fname in files:
             fpath = os.path.join(docs_dir, fname)

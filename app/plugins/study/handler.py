@@ -292,7 +292,7 @@ class StudyPlugin(Plugin):
 
 
     async def _handle_files(self, ctx: BotContext) -> str:
-        """Handle /files — list all files on disk in app/docs/."""
+        """Handle /files — list all files with numeric IDs."""
         import os
         from datetime import datetime
 
@@ -311,7 +311,6 @@ class StudyPlugin(Plugin):
         if not files:
             return "📭 No files in docs directory."
 
-        # Sort by modification time (newest first)
         files.sort(key=lambda x: x[2], reverse=True)
 
         # Check which are indexed
@@ -326,60 +325,78 @@ class StudyPlugin(Plugin):
             pass
 
         lines = ["📁 *Files in docs directory*\n"]
-        for fname, size_mb, modified in files:
+        for i, (fname, size_mb, modified) in enumerate(files, 1):
             status = "✅ indexed" if fname in indexed_files else "⬜ not indexed"
             time_str = modified.strftime("%d %b %Y, %H:%M")
+            # Truncate long filenames for cleaner display
+            display_name = fname if len(fname) < 50 else fname[:47] + "..."
             lines.append(
-                f"📄 `{fname}`\n"
-                f"   └─ {size_mb:.1f} MB · {status} · {time_str}\n"
+                f"[{i}] `{display_name}`\n"
+                f"    └─ {size_mb:.1f} MB · {status} · {time_str}\n"
             )
 
-        lines.append(f"_Total: {len(files)} files_")
+        lines.append(f"\n_Total: {len(files)} files_")
+        lines.append("_Delete by ID_: `/delete <number>`")
         return "\n".join(lines)
 
     async def _handle_delete(self, ctx: BotContext) -> str:
-        """Handle /delete <filename> — delete a file from app/docs/."""
+        """Handle /delete <id> — delete a file by its numeric ID."""
         import os
-        import glob
+        from datetime import datetime
 
         text = ctx.message_text.strip()
-        name = text[len("/delete"):].strip()
+        raw = text[len("/delete"):].strip()
 
-        if not name:
+        if not raw:
             return (
-                "📝 *Usage:* `/delete <filename>`\n\n"
-                "Delete a file from your study documents.\n"
-                "Use `/files` to see all files.\n\n"
+                "📝 *Usage:* `/delete <id>`\n\n"
+                "Delete a file by its number.\n"
+                "Use `/files` to see all files with IDs.\n\n"
+                "_Example:_ `/delete 3`\n"
                 "_Note: Run `/index` after deleting to update the index._"
             )
 
+        # Parse ID
+        try:
+            file_id = int(raw)
+        except ValueError:
+            return "⚠️ Please use the file number from `/files`. Example: `/delete 3`"
+
+        if file_id < 1:
+            return "⚠️ Invalid ID. Use a positive number from `/files`."
+
+        # Build sorted file list (same order as /files)
         docs_dir = settings.docs_dir
         if not os.path.isdir(docs_dir):
             return "📁 No files directory found."
 
-        # Search for matching files
-        matches = []
+        files = []
         for f in os.listdir(docs_dir):
-            if name.lower() in f.lower():
-                matches.append(f)
+            fpath = os.path.join(docs_dir, f)
+            if os.path.isfile(fpath) and not f.startswith("."):
+                modified = datetime.fromtimestamp(os.path.getmtime(fpath))
+                files.append((f, modified))
 
-        if not matches:
-            return f"❌ No files matching `{name}` found. Use `/files` to see available files."
+        if not files:
+            return "📭 No files to delete."
 
-        if len(matches) > 1:
-            match_list = "\n".join(f"  • `{f}`" for f in matches[:10])
+        files.sort(key=lambda x: x[1], reverse=True)
+
+        if file_id > len(files):
             return (
-                f"⚠️ Multiple files match `{name}`:\n{match_list}\n\n"
-                f"Please be more specific."
+                f"⚠️ Invalid ID `{file_id}`. Use a number between 1 and {len(files)}.\n"
+                f"Run `/files` to see the list."
             )
 
-        # Delete the file
-        fpath = os.path.join(docs_dir, matches[0])
+        # Delete by index
+        fname = files[file_id - 1][0]
+        fpath = os.path.join(docs_dir, fname)
+
         try:
             os.remove(fpath)
-            logger.info("Deleted file: %s", fpath)
+            logger.info("Deleted file #%d: %s", file_id, fpath)
             return (
-                f"🗑️ *Deleted:* `{matches[0]}`\n\n"
+                f"🗑️ *Deleted file #{file_id}:* `{fname}`\n\n"
                 f"Run `/index` to rebuild the index without this file."
             )
         except OSError as e:
