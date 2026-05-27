@@ -56,21 +56,30 @@ async def get_db():
 
 async def init_db() -> None:
     db = await get_db()
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS documents (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT NOT NULL,
-            filepath TEXT NOT NULL UNIQUE,
-            file_size INTEGER DEFAULT 0,
-            chunk_count INTEGER DEFAULT 0,
-            display_name TEXT,
-            indexed_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    try:
-        await db.execute("ALTER TABLE documents ADD COLUMN display_name TEXT")
-    except Exception:
-        pass
+async def init_db() -> None:
+    db = await get_db()
+
+    # Build the documents table — idempotent via separate ALTERs (handles existing tables)
+    await db.execute(
+        "CREATE TABLE IF NOT EXISTS documents ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT NOT NULL, "
+        "  filepath TEXT NOT NULL UNIQUE, file_size INTEGER DEFAULT 0, "
+        "  display_name TEXT, indexed_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+        ")",
+    )
+    # Add columns idempotently (OK if they already exist)
+    for col, coltype in [
+        ("display_name", "TEXT"),
+        ("word_count", "INTEGER DEFAULT 0"),
+        ("chunk_count", "INTEGER DEFAULT 0"),
+        ("parse_method", "TEXT"),
+        ("verified", "INTEGER DEFAULT 0"),
+    ]:
+        try:
+            await db.execute(f"ALTER TABLE documents ADD COLUMN {col} {coltype}")
+            logger.info("Added column: %s", col)
+        except Exception:
+            pass
     await db.execute("""
         CREATE TABLE IF NOT EXISTS query_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

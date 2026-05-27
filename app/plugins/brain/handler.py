@@ -263,43 +263,44 @@ async def _tool_summarize(topic: str) -> str:
         return f"⚠️ Sorry, summary failed: {e}"
 
 
-async def _tool_list_docs() -> str:
-    """Execute the list_docs() tool — list indexed documents."""
+async def _tool_list_docs_v2() -> str:
+    """Execute /docs — list indexed documents with full metadata."""
     from app.database import get_db
+    from app.ui.helpers import _build_file_card, _build_total_footer
     try:
         db = await get_db()
         cursor = await db.execute(
-            "SELECT filename, file_size, chunk_count, indexed_at, display_name FROM documents "
-            "ORDER BY indexed_at DESC"
+            "SELECT filename, file_size, word_count, chunk_count, "
+            "       parse_method, verified, indexed_at, display_name "
+            "FROM documents ORDER BY indexed_at DESC"
         )
         rows = await cursor.fetchall()
         if not rows:
-            return "📭 *No documents indexed yet.*\n\nAdd PDFs to `app/docs/` and run `/index`."
+            return (
+                "📭 *No documents indexed yet.*\n\n"
+                "Add PDFs/EPUBs to `app/docs/` and run `/index`."
+            )
 
-        lines = ["📚 *Indexed Documents*\n"]
-        for r in rows:
-            size_mb = r["file_size"] / (1024 * 1024) if r["file_size"] else 0
-            chunks = r["chunk_count"] or 0
-            indexed = r["indexed_at"] or "unknown"
+        # Collect totals
+        total_words = sum(r["word_count"] or 0 for r in rows)
+        total_chunks = sum(r["chunk_count"] or 0 for r in rows)
 
-            # Format timestamp nicely
-            try:
-                from datetime import datetime
-                dt = datetime.strptime(indexed, "%Y-%m-%d %H:%M:%S")
-                indexed_fmt = dt.strftime("%d %b %Y, %H:%M")
-            except (ValueError, TypeError):
-                indexed_fmt = str(indexed)
-
-            name = r["display_name"] or r["filename"].replace(".pdf", "").replace("-", " ").replace("_", " ")
-            lines.append(f"📄 **{name}**")
-            lines.append(f"   └─ {size_mb:.1f} MB · {chunks} chunks · indexed {indexed_fmt}")
+        lines = [f"📚 *Your Library* ({len(rows)} document{'s' if len(rows) != 1 else ''} indexed)\n"]
+        for i, r in enumerate(rows, 1):
+            lines.append(_build_file_card(dict(r), index_position=i))
             lines.append("")
 
-        lines.append(f"_Total: {len(rows)} documents_")
+        lines.append(_build_total_footer(
+            total_docs=len(rows),
+            total_words=total_words,
+            total_chunks=total_chunks,
+        ))
+
         return "\n".join(lines)
     except Exception as e:
-        logger.error("list_docs() failed: %s", e)
+        logger.error("list_docs_v2() failed: %s", e)
         return f"⚠️ Failed to list documents: {e}"
+
 
 
 async def _tool_chat(text: str) -> str:
@@ -389,7 +390,7 @@ _TOOL_REGISTRY = {
     "ask": _tool_ask,
     "quiz": _tool_quiz,
     "summarize": _tool_summarize,
-    "list_docs": _tool_list_docs,
+    "list_docs": _tool_list_docs_v2,
     "chat": _tool_chat,
     "retrieve": _tool_retrieve,
     "feedback": _tool_feedback,

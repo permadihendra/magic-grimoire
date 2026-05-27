@@ -592,9 +592,13 @@ class DocumentIndexer:
 
                 await db.execute(
                     """INSERT OR REPLACE INTO documents
-                       (filename, filepath, file_size, display_name, word_count, chunk_count)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (fname, fpath, size, display_name, word_count, chunk_count),
+                       (filename, filepath, file_size, display_name,
+                        word_count, chunk_count, parse_method, verified)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (fname, fpath, size, display_name,
+                     word_count, chunk_count,
+                     result.method if result else "unknown",
+                     1 if self._last_build_stats and self._last_build_stats.get("probe_ok") else 0),
                 )
             except OSError:
                 pass

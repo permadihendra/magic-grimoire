@@ -222,9 +222,9 @@ class StudyPlugin(Plugin):
             return f"⚠️ *Quiz generation failed:* `{str(e)[:300]}`"
 
     async def _handle_docs(self, ctx: BotContext) -> str:
-        """Handle /docs — list indexed documents with professional formatting."""
-        from app.plugins.brain.handler import _tool_list_docs
-        return await _tool_list_docs()
+        """Handle /docs — list indexed documents with full metadata."""
+        from app.plugins.brain.handler import _tool_list_docs_v2
+        return await _tool_list_docs_v2()
 
     async def _handle_index(self, ctx: BotContext) -> str:
         """Handle /index — verify, parse, embed, and report with full diagnostics."""
@@ -403,9 +403,8 @@ class StudyPlugin(Plugin):
         return result_text
 
     async def _handle_files(self, ctx: BotContext) -> str:
-        """Handle /files — list all files with numeric IDs."""
+        """Handle /files — list all files on disk with indexed status and metadata."""
         import os
-        from datetime import datetime
 
         docs_dir = settings.docs_dir
         if not os.path.isdir(docs_dir):
@@ -415,39 +414,46 @@ class StudyPlugin(Plugin):
         for f in os.listdir(docs_dir):
             fpath = os.path.join(docs_dir, f)
             if os.path.isfile(fpath) and not f.startswith("."):
-                size_mb = os.path.getsize(fpath) / (1024 * 1024)
-                modified = datetime.fromtimestamp(os.path.getmtime(fpath))
-                files.append((f, size_mb, modified))
+                mtime = os.path.getmtime(fpath)
+                files.append((f, fpath, os.path.getsize(fpath), mtime))
 
         if not files:
             return "📭 No files in docs directory."
 
-        files.sort(key=lambda x: x[2], reverse=True)
+        files.sort(key=lambda x: x[3], reverse=True)  # newest first
 
-        # Check which are indexed
+        # Load indexed state from DB
         from app.database import get_db
+        from app.ui.helpers import _build_files_card, _build_total_footer
         db = await get_db()
-        indexed_files = set()
+        db_rows = {}
         try:
-            cursor = await db.execute("SELECT filename FROM documents")
-            for row in await cursor.fetchall():
-                indexed_files.add(row["filename"])
-        except Exception:
-            pass
-
-        lines = ["📁 *Files in docs directory*\n"]
-        for i, (fname, size_mb, modified) in enumerate(files, 1):
-            status = "✅ indexed" if fname in indexed_files else "⬜ not indexed"
-            time_str = modified.strftime("%d %b %Y, %H:%M")
-            # Truncate long filenames for cleaner display
-            display_name = fname if len(fname) < 50 else fname[:47] + "..."
-            lines.append(
-                f"[{i}] `{display_name}`\n"
-                f"    └─ {size_mb:.1f} MB · {status} · {time_str}\n"
+            cursor = await db.execute(
+                "SELECT filename, display_name, word_count, chunk_count, "
+                "       parse_method, verified, indexed_at "
+                "FROM documents"
             )
+            for r in await cursor.fetchall():
+                db_rows[r["filename"]] = dict(r)
+        except Exception as e:
+            logger.debug("Could not load documents DB: %s", e)
 
-        lines.append(f"\n_Total: {len(files)} files_")
-        lines.append("_Delete by ID_: `/delete <number>`")
+        indexed_count = sum(1 for f in files if f[0] in db_rows)
+
+        lines = [
+            f"📁 *Files in docs directory* "
+            f"({len(files)} files, {indexed_count} indexed)\n"
+        ]
+        for i, (fname, fpath, size_bytes, mtime) in enumerate(files, 1):
+            db_row = db_rows.get(fname)
+            lines.append(_build_files_card(fname, size_bytes, mtime, db_row, i))
+            lines.append("")
+
+        lines.append(_build_total_footer(
+            total_files=len(files),
+            indexed_count=indexed_count,
+        ))
+        lines.append("_Delete by ID: /delete <number>_ | _Re-index: /index_")
         return "\n".join(lines)
 
     async def _handle_delete(self, ctx: BotContext) -> str:
@@ -498,20 +504,53 @@ class StudyPlugin(Plugin):
                 f"⚠️ Invalid ID `{file_id}`. Use a number between 1 and {len(files)}.\n"
                 f"Run `/files` to see the list."
             )
-
         # Delete by index
         fname = files[file_id - 1][0]
         fpath = os.path.join(docs_dir, fname)
 
+        # Load indexed metadata before deleting (for impact report)
+        db = await get_db()
+        db_row = None
+        try:
+            cursor = await db.execute(
+                "SELECT display_name, word_count, chunk_count, file_size "
+                "FROM documents WHERE filename = ?",
+                (fname,),
+            )
+            db_row = await cursor.fetchone()
+        except Exception:
+            pass
+
         try:
             os.remove(fpath)
             logger.info("Deleted file #%d: %s", file_id, fpath)
+
+            # Build impact report
+            impact = []
+            if db_row:
+                size_mb = (db_row["file_size"] or 0) / (1024 * 1024)
+                words = db_row["word_count"] or 0
+                chunks = db_row["chunk_count"] or 0
+                if size_mb > 0:
+                    impact.append(f"{size_mb:.1f} MB")
+                if words > 0:
+                    impact.append(f"{words:,} words")
+                if chunks > 0:
+                    impact.append(f"{chunks} chunks")
+                impact_str = " · ".join(impact) if impact else "no metadata"
+            else:
+                impact_str = "not in index"
+
             return (
-                f"🗑️ *Deleted file #{file_id}:* `{fname}`\n\n"
+                f"🗑️ *Deleted file #{file_id}:* `{fname}`\n"
+                f"   └─ {impact_str}\n\n"
                 f"Run `/index` to rebuild the index without this file."
             )
+
         except OSError as e:
             logger.error("Failed to delete %s: %s", fpath, e)
+            return f"⚠️ Failed to delete file: {e}"
+
             return f"⚠️ Failed to delete file: {e}"
 
 # ── Module-level tool functions (imported by BrainPlugin) ──
@@ -617,7 +656,37 @@ async def generate_quiz(topic: str, count: int = 5, difficulty: str = "normal") 
 
         logger.info("generate_quiz: %s (count=%d, difficulty=%s)", topic[:80], count, difficulty)
         enhanced_topic = f"Generate {count} practice questions about: {topic}"
-        return await _rag_engine.query(enhanced_topic, mode="quiz", difficulty=difficulty, count=count)
+
+        # Retrieve passages first (for source metadata + token budget)
+        passages = _rag_engine.retrieve_only(enhanced_topic)
+        chunk_count = len(passages)
+        total_tokens = sum(len(p["text"].split()) * 1.3 for p in passages) if passages else 0
+        
+        result = await _rag_engine.query(enhanced_topic, mode="quiz", difficulty=difficulty, count=count)
+
+        # Append source metadata + next-step (same pattern as /ask answers)
+        if passages:
+            short_names = []
+            seen = set()
+            for p in passages[:3]:
+                from app.rag.engine import _lookup_display_name
+                sn = _lookup_display_name(p["filename"])
+                if sn not in seen:
+                    seen.add(sn)
+                    short_names.append(sn)
+            if short_names:
+                src_line = "\n\n📖 *Sources used:* " + " · ".join(f"_{s}_" for s in short_names)
+                result += src_line
+
+        result += (
+            f"\n\n💡 *Next steps:* Ask a follow-up question, or try `/summarize` for a topic overview."
+        )
+        result += (
+            f"\n\n📊 *Retrieval:* {chunk_count} chunks | "
+            f"~{int(total_tokens)} tokens | difficulty={difficulty}"
+        )
+
+        return result
     except Exception as e:
         logger.error("generate_quiz failed: %s", e, exc_info=True)
         return f"⚠️ Quiz generation failed: {e}"
@@ -645,7 +714,34 @@ async def summarize_topic(topic: str) -> str:
             return "📭 No documents indexed yet! Run `/index` first."
 
         logger.info("summarize_topic: %s", topic[:80])
-        return await _rag_engine.query(topic, mode="summary")
+        passages = _rag_engine.retrieve_only(topic)
+        chunk_count = len(passages)
+        total_tokens = sum(len(p["text"].split()) * 1.3 for p in passages) if passages else 0
+
+        result = await _rag_engine.query(topic, mode="summary")
+
+        if passages:
+            short_names = []
+            seen = set()
+            for p in passages[:3]:
+                from app.rag.engine import _lookup_display_name
+                sn = _lookup_display_name(p["filename"])
+                if sn not in seen:
+                    seen.add(sn)
+                    short_names.append(sn)
+            if short_names:
+                src_line = "\n\n📖 *Sources used:* " + " · ".join(f"_{s}_" for s in short_names)
+                result += src_line
+
+        result += (
+            f"\n\n💡 *Next steps:* Ask `/quiz {topic}` to practice, "
+            f"or ask a specific `/ask` question about this topic."
+        )
+        result += (
+            f"\n\n📊 *Retrieval:* {chunk_count} chunks | ~{int(total_tokens)} tokens"
+        )
+
+        return result
     except Exception as e:
         logger.error("summarize_topic failed: %s", e, exc_info=True)
         return f"⚠️ Summary failed: {e}"
