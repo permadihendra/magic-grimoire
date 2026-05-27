@@ -397,14 +397,29 @@ class BrainPlugin(Plugin):
                 except Exception as e:
                     logger.debug("Stats/estimate update failed: %s", e)
 
-            # Execute tools
+            # Execute tools with error handling
             result_lines = []
             for t_name, t_params in tool_tasks:
                 tool_fn = _TOOL_REGISTRY.get(t_name)
                 if tool_fn:
                     logger.info("Brain: executing tool '%s' with %s", t_name, t_params)
-                    result = await tool_fn(**t_params)
-                    result_lines.append(result)
+                    try:
+                        result = await tool_fn(**t_params)
+                        result_lines.append(result)
+                    except Exception as e:
+                        logger.error("Tool '%s' failed: %s", t_name, e, exc_info=True)
+                        error_msg = (
+                            "⚠️ *Sorry, the analysis failed.*\n\n"
+                            f"Error: `{e}`\n\n"
+                            "Suggestions:\n"
+                            "• Try a simpler or more specific question\n"
+                            "• Check that Ollama is running (`ollama serve`)\n"
+                            "• Run `/index` to rebuild the index"
+                        )
+                        if thinking_id:
+                            await _edit_message(chat_id, thinking_id, error_msg)
+                        _remember(chat_id, message, error_msg)
+                        return None
                 else:
                     result_lines.append(f"⚠️ Unknown tool: {t_name}")
 
@@ -415,12 +430,11 @@ class BrainPlugin(Plugin):
             if thinking_id:
                 ok = await _edit_message(chat_id, thinking_id, final_reply)
                 if not ok:
-                    # Edit failed — send as new message instead
                     _remember(chat_id, message, final_reply)
                     return final_reply
 
             _remember(chat_id, message, final_reply)
-            return None  # Edit succeeded — gateway does nothing
+            return None
 
         # ── 4b. Fast path — execute directly, return text ───
         result_lines = []

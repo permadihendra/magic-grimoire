@@ -135,7 +135,11 @@ async def webhook(request: Request) -> Response:
 
     # Process — BrainPlugin manages thinking indicators internally for slow ops
     try:
-        reply = await dispatch(update, None)
+        import asyncio
+        reply = await asyncio.wait_for(dispatch(update, None), timeout=300)
+    except asyncio.TimeoutError:
+        logger.error("Dispatch timed out after 300s")
+        reply = "⏳ Processing timed out after 5 minutes.\nTry a simpler or more specific question."
     except Exception as e:
         logger.error("Dispatch failed: %s", e, exc_info=True)
         reply = "⚠️ Sorry, something went wrong processing your request."
