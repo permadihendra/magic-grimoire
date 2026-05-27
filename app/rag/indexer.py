@@ -114,7 +114,7 @@ def _try_ebooklib(raw_bytes: bytes, fname: str) -> ParseResult:
         text = "\n\n".join(t.strip() for t in text_parts if t.strip())
         if text and len(text) > 100:
             word_count = len(text.split())
-            doc = LIDocument(text=text, metadata={"file_name": fname})
+            doc = LIDocument(text=text, metadata={"file_name": os.path.basename(fname)})
             logger.info("ebooklib parsed %s: %d words", fname, word_count)
             return ParseResult(success=True, method="ebooklib (EPUB)",
                                word_count=word_count, char_count=len(text), doc=doc)
@@ -138,7 +138,7 @@ def _try_liteparse(raw_bytes: bytes, fname: str) -> ParseResult:
         text = result.text.strip()
         if text and len(text) > 100:
             word_count = len(text.split())
-            doc = LIDocument(text=text, metadata={"file_name": fname})
+            doc = LIDocument(text=text, metadata={"file_name": os.path.basename(fname)})
             logger.info("LiteParse parsed %s: %d words", fname, word_count)
             return ParseResult(success=True, method="LiteParse (PDF/OCR)",
                                word_count=word_count, char_count=len(text), doc=doc)
@@ -163,7 +163,7 @@ def _try_simple_dir(fname: str) -> ParseResult:
                 pass
             text = docs[0].text
             word_count = len(text.split())
-            doc = LIDocument(text=text, metadata={"file_name": fname})
+            doc = LIDocument(text=text, metadata={"file_name": os.path.basename(fname)})
             logger.info("SimpleDirectoryReader parsed %s: %d words", fname, word_count)
             return ParseResult(success=True, method="SimpleDirectoryReader (PDF/TXT)",
                                word_count=word_count, char_count=len(text), doc=doc)
@@ -209,7 +209,7 @@ def _try_calibre(fname: str) -> ParseResult:
 
         if text and len(text) > 100:
             word_count = len(text.split())
-            doc = LIDocument(text=text, metadata={"file_name": fname})
+            doc = LIDocument(text=text, metadata={"file_name": os.path.basename(fname)})
             logger.info("Calibre parsed %s: %d words", fname, word_count)
             return ParseResult(success=True, method="Calibre CLI (EPUB→TXT)",
                                word_count=word_count, char_count=len(text), doc=doc)
@@ -564,9 +564,11 @@ class DocumentIndexer:
         await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         await db.execute("DELETE FROM documents")
 
-        # Build lookup: fname → ParseResult
-        result_map = {r.doc.metadata.get("file_name", "") if r.doc else "": r
-                      for r in self._parse_results if r.success}
+        # Build lookup: fname → ParseResult (basename for reliable matching)
+        result_map = {
+            os.path.basename(r.doc.metadata.get("file_name", "") if r.doc else ""): r
+            for r in self._parse_results if r.success
+        }
 
         for fname in files:
             fpath = os.path.join(docs_dir, fname)
@@ -582,7 +584,7 @@ class DocumentIndexer:
                     try:
                         chunks = [
                             n for n in self._index.docstore.docs.values()
-                            if n.metadata.get("file_name") == fname
+                if os.path.basename(n.metadata.get("file_name", "")) == fname
                         ]
                         chunk_count = len(chunks)
                     except Exception:
@@ -616,7 +618,7 @@ class DocumentIndexer:
         try:
             chunks = [
                 n for n in self._index.docstore.docs.values()
-                if n.metadata.get("file_name") == doc_filepath
+                if os.path.basename(n.metadata.get("file_name", "")) == doc_filepath
             ]
             return len(chunks)
         except Exception:
