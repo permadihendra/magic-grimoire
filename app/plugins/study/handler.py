@@ -450,6 +450,7 @@ class StudyPlugin(Plugin):
             lines.append("")
 
         lines.append(_build_total_footer(
+            total_docs=0,  # /files doesn't track document count separately
             total_files=len(files),
             indexed_count=indexed_count,
         ))
@@ -628,7 +629,7 @@ async def retrieve_passages(query: str, document: str | None = None, chat_id: in
         return []
 
 
-async def generate_quiz(topic: str, count: int = 5, difficulty: str = "normal") -> str:
+async def generate_quiz(topic: str, count: int = 5, difficulty: str = "normal", chat_id: int | None = None) -> str:
     """Generate practice questions on a topic.
 
     Args:

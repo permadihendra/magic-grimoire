@@ -239,7 +239,7 @@ async def _tool_ask(query: str, difficulty: str = "normal", document: str | None
         return f"⚠️ Sorry, I couldn't find an answer.\n\nError: {e}"
 
 
-async def _tool_quiz(topic: str, count: str = "5", difficulty: str = "normal") -> str:
+async def _tool_quiz(topic: str, count: str = "5", difficulty: str = "normal", chat_id: int | None = None) -> str:
     """Execute the quiz() tool — generate practice questions."""
     from app.plugins.study.handler import generate_quiz
     try:
@@ -247,7 +247,7 @@ async def _tool_quiz(topic: str, count: str = "5", difficulty: str = "normal") -
     except (ValueError, TypeError):
         n = 5
     try:
-        return await generate_quiz(topic, n, difficulty=difficulty)
+        return await generate_quiz(topic, n, difficulty=difficulty, chat_id=chat_id)
     except Exception as e:
         logger.error("quiz() failed: %s", e)
         return f"⚠️ Sorry, quiz generation failed: {e}"

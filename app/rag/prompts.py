@@ -58,23 +58,38 @@ Guidelines:"""
 QUIZ_NORMAL = QUIZ_BASE + """
 - Create questions that test DEEP understanding, not just memorization
 - Include a mix of: multiple choice, short answer, and scenario-based questions
-- For multiple choice: provide 4 options (A/B/C/D) and mark the correct answer
+- CRITICAL: For EVERY question, the answer must appear DIRECTLY below it.
+  Do NOT put all answers at the end. The format must be:
+  Q1. [Question]
+  Answer: [answer here]
+  or
+  Q1. [Question]
+  A) [Option]  B) [Option]  C) [Option]  D) [Option]
+  ✅ Answer: B) [correct option] — [brief explanation]
+- After the full quiz, provide a brief answer KEY summarizing all answers.
 - Focus on concepts most likely to appear in professional assessments
 - Cover: key concepts, definitions, comparisons, edge cases, and applications
-- After the quiz, provide a brief answer key with explanations
 """
 QUIZ_SIMPLE = QUIZ_BASE + """
 - Focus on basic recall and fundamental concepts
 - Use straightforward language
-- Prefer multiple choice over open-ended questions
-- After the quiz, explain each answer briefly
+- CRITICAL: For EVERY question, the answer must appear DIRECTLY below it:
+  Q1. [Question]
+  Answer: [single sentence answer]
+- After the full quiz, provide a brief answer KEY.
 """
 QUIZ_ADVANCED = QUIZ_BASE + """
 - Focus on application, analysis, and synthesis of concepts
 - Include scenario-based and case-study questions
 - Ask "why" and "how" questions that connect multiple topics
-- Expect the user to apply concepts to novel situations
-- After the quiz, discuss the reasoning behind each answer in depth
+- CRITICAL: For EVERY question, the answer must appear DIRECTLY below it:
+  Q1. [Question]
+  Answer: [detailed answer with reasoning]
+  or
+  Q1. [Question]
+  A) [Option]  B) [Option]  C) [Option]  D) [Option]
+  ✅ Answer: D) [correct option] — [explanation of why this is correct and why others are wrong]
+- After the full quiz, provide a comprehensive answer KEY with thorough explanations.
 """
 
 
