@@ -67,9 +67,11 @@ Available tools:
 - TOOL: ask(query, difficulty="normal", document=None) — Query your study documents.
   difficulty can be "simple", "normal", or "advanced".
   document: optional document name to focus search on.
-  If the user says "in the [name] book" or "from [name] extract the document name and pass it here.
+  If the user mentions a specific book/document by name, extract it and pass it here.
   The tool output IS the answer (with source citations).
-  Do NOT write your own answer before this tool.
+  BEFORE calling this tool, write 1-2 sentences of conversational text explaining 
+  what you're about to do. This text will be shown to the user while they wait.
+  Example: "Let me look through the World Economy book for key takeaways...\\nTOOL: ask(...)"
 
 - TOOL: quiz(topic, count=5, difficulty="normal") — Generate practice questions.
   The tool output IS the quiz.
@@ -385,14 +387,15 @@ class BrainPlugin(Plugin):
 
         is_slow = any(t in _SLOW_TOOLS for t, _ in tool_tasks)
 
-        is_slow = any(t in _SLOW_TOOLS for t, _ in tool_tasks)
-
         # ── 4a. Slow path — send thinking, execute, edit ────
         if is_slow:
             tool_names = [t for t, _ in tool_tasks]
 
-            # Send initial thinking message
-            if "ask" in tool_names:
+            # Use Gemini's conversational text as thinking message (PLAN audit fix)
+            conv_preview = "\n".join(conversational_parts).strip()
+            if conv_preview:
+                thinking_text = conv_preview
+            elif "ask" in tool_names:
                 thinking_text = "📖 Searching documents for relevant passages..."
             elif "quiz" in tool_names:
                 thinking_text = "📝 Generating practice questions..."

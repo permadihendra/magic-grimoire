@@ -104,13 +104,21 @@ class RAGEngine:
         retriever = self._get_retriever()
         nodes = retriever.retrieve(question)
 
-        # Apply document boosting
+        # Apply document boosting (PLAN #6 + PLAN audit fix)
         if document:
-            doc_lower = document.lower()
+            doc_words = set(document.lower().replace("_", " ").replace(".", " ").split())
+            stopwords = {"a", "an", "the", "and", "or", "but", "for", "nor", "of",
+                        "in", "on", "at", "to", "by", "with", "from", "pdf", "epub"}
+            doc_words -= stopwords
             for node in nodes:
                 fname = node.metadata.get("file_name", "").lower()
-                if doc_lower in fname:
-                    node.score = (node.score or 0) * 1.5
+                fname_norm = fname.replace("_", " ").replace(".", " ")
+                fname_words = set(fname_norm.split())
+                if doc_words:
+                    overlap = len(doc_words & fname_words) / len(doc_words)
+                    if overlap >= 0.5:
+                        boost = 1.0 + (overlap * 1.0)
+                        node.score = (node.score or 0) * boost
             nodes.sort(key=lambda n: n.score or 0, reverse=True)
 
         passages = []
@@ -176,13 +184,25 @@ class RAGEngine:
         retriever = self._get_retriever()
         nodes = retriever.retrieve(question)
 
-        # Document-aware boosting
+        # Document-aware boosting (PLAN #6 + PLAN audit fix: normalize names)
         if document:
-            doc_lower = document.lower()
+            # Normalize: replace separators with spaces, collapse whitespace
+            doc_words = set(document.lower().replace("_", " ").replace(".", " ").split())
+            # Filter out common stopwords
+            stopwords = {"a", "an", "the", "and", "or", "but", "for", "nor", "of",
+                        "in", "on", "at", "to", "by", "with", "from", "pdf", "epub"}
+            doc_words -= stopwords
+
             for node in nodes:
                 fname = node.metadata.get("file_name", "").lower()
-                if doc_lower in fname:
-                    node.score = (node.score or 0) * 1.5
+                fname_norm = fname.replace("_", " ").replace(".", " ")
+                fname_words = set(fname_norm.split())
+                # How many query words match the filename?
+                if doc_words:
+                    overlap = len(doc_words & fname_words) / len(doc_words)
+                    if overlap >= 0.5:  # At least 50% of query words match
+                        boost = 1.0 + (overlap * 1.0)  # 1.5x for 50%, 2.0x for 100%
+                        node.score = (node.score or 0) * boost
             nodes.sort(key=lambda n: n.score or 0, reverse=True)
 
         # Extract unique sources
