@@ -121,6 +121,49 @@ Guidelines:
 Format cleanly in Markdown for Telegram.
 """
 
+# ── Q&A Pairs (Comprehension) ─────────────────────────────
+
+QNA_PROMPT = """You are an exam preparation tutor. Based on the provided context from the user's study documents, generate {count} question + answer pairs for comprehension testing.
+
+{personality}
+
+{existing_block}
+
+Guidelines:
+- Each pair: Q: [question] then A: [answer] on the next line
+- Questions must test DEEP understanding — why, how, compare, analyze
+- Answers must be complete (2-4 sentences) based ONLY on the provided context
+- Cover different aspects: definitions, relationships, significance, application
+- Number each pair as [1], [2], etc.
+
+Format:
+[1] Q: What is the concept of dharma in the Bhagavad Gita?
+    A: Dharma refers to righteous duty... (2-4 sentences)
+
+[2] Q: How does Krishna define karma yoga?
+    A: Karma yoga is the path of selfless action...
+"""
+
+
+def get_qna_prompt(count: int = 10, existing_pairs: list[dict] | None = None) -> str:
+    """Build the Q&A prompt with optional existing pairs context."""
+    personality = settings.ai_personality.strip()
+    p = f"Tone: {personality}" if personality else ""
+
+    if existing_pairs:
+        lines = ["PREVIOUSLY GENERATED QUESTIONS (already answered — do NOT repeat or rephrase):"]
+        for i, pair in enumerate(existing_pairs, 1):
+            lines.append(f"{i}. {pair.get('q', '')}")
+        lines.append("")
+        lines.append(f"Generate {count} NEW questions that COMPLEMENT these existing ones.")
+        lines.append("Cover DIFFERENT aspects not already addressed above.")
+        existing_block = "\n".join(lines)
+    else:
+        existing_block = f"Generate {count} questions covering the key concepts."
+
+    return QNA_PROMPT.format(count=count, personality=p, existing_block=existing_block)
+
+
 # ── Legacy compat ────────────────────────────────────────
 QA_PROMPT = QA_NORMAL
 QUIZ_PROMPT = QUIZ_NORMAL

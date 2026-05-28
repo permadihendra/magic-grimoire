@@ -13,6 +13,7 @@ Features:
 - Graceful error messages instead of silent failures
 """
 
+import asyncio
 import logging
 import os
 import time
@@ -30,10 +31,14 @@ logger = logging.getLogger(__name__)
 _rag_engine: RAGEngine | None = None
 _doc_indexer: DocumentIndexer | None = None
 
+# ── QnA history (complement-on-rerun) ───────────────────
+# key: (chat_id, topic_lower) → [{"q": ..., "a": ...}, ...]
+_qna_history: dict[tuple[int, str], list[dict]] = {}
+
 
 class StudyPlugin(Plugin):
     name = "study"
-    commands = ["ask", "quiz", "docs", "index", "files", "delete", "summarize"]
+    commands = ["ask", "quiz", "docs", "index", "files", "delete", "summarize", "qna"]
     description = "RAG study agent — query documents, generate quizzes"
 
     async def on_load(self) -> None:
@@ -93,6 +98,9 @@ class StudyPlugin(Plugin):
 
         if cmd == "/delete":
             return await self._handle_delete(ctx)
+
+        if cmd == "/qna":
+            return await self._handle_qna(ctx)
 
         if cmd == "/summarize":
             return await self._handle_summarize(ctx)
@@ -274,6 +282,154 @@ class StudyPlugin(Plugin):
         except Exception as e:
             logger.error("Summary generation failed: %s", e, exc_info=True)
             return f"⚠️ *Summary generation failed:* `{str(e)[:300]}`"
+
+    async def _handle_qna(self, ctx: BotContext) -> str | DispatchResult:
+        """Handle /qna <topic> — generate comprehension Q&A pairs.
+
+        First call generates 10 Q&A pairs.
+        Second call on same topic generates 10 NEW pairs that complement.
+        """
+        global _rag_engine, _doc_indexer, _qna_history
+
+        # Parse args
+        text = ctx.message_text.strip()
+        topic = text[len("/qna"):].strip()
+        # Parse optional count (e.g. "/qna krishna 15")
+        count = 10
+        if topic:
+            parts = topic.rsplit(None, 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                topic = parts[0]
+                count = max(3, min(20, int(parts[1])))
+
+        if not topic:
+            return (
+                "📝 *Usage:* `/qna <topic>` or `/qna <topic> <count>`\n\n"
+                "Example: `/qna krishna teachings 10`\n"
+                "Example: `/qna mahabharata` (defaults to 10)"
+            )
+
+        await self._progress(ctx, "📖 Loading your study materials...")
+
+        error = await self._ensure_index_ready(ctx)
+        if error:
+            return error
+
+        # Check for existing Q&A on this topic (complement-on-rerun)
+        key = (ctx.chat_id, topic.lower())
+        existing = _qna_history.get(key, [])
+        is_rerun = len(existing) > 0
+        start_num = len(existing) + 1  # numbering continues
+
+        logger.info("Generating %d Q&A on: %s (rerun=%s, existing=%d)", count, topic, is_rerun, len(existing))
+        await self._progress(ctx, f"📝 Generating {count} Q&A pairs" + (" (complementing previous)..." if is_rerun else "..."))
+
+        from app.rag.prompts import get_qna_prompt
+
+        try:
+            from app.rag.engine import shorten_filename
+
+            t0 = time.time()
+
+            # Retrieve passages for context
+            passages = _rag_engine.retrieve_only(topic, chat_id=ctx.chat_id)
+            chunk_texts = [p["text"] for p in passages[:10]] if passages else []
+
+            if not chunk_texts:
+                return "📭 I couldn't find relevant passages on that topic. Try a different topic."
+
+            # Build prompt with existing pairs context
+            prompt = get_qna_prompt(count=count, existing_pairs=existing if is_rerun else None)
+
+            from app.rag.models import get_llm
+            from app.rag.guard import OllamaGuard, OllamaBusyError, OllamaDeadError
+
+            try:
+                async with OllamaGuard("qna generation", timeout=120):
+                    llm = get_llm()
+                    from llama_index.core.response_synthesizers import TreeSummarize
+                    synthesizer = TreeSummarize(llm=llm)
+
+                    # Use the prompt as summary template
+                    response = await asyncio.wait_for(
+                        synthesizer.aget_response(
+                            query_str=topic,
+                            text_chunks=chunk_texts,
+                            summary_template=prompt,
+                        ),
+                        timeout=60.0,
+                    )
+                    answer_text = str(response).strip()
+
+            except OllamaBusyError:
+                return "⏳ Another operation is in progress. Try again shortly."
+            except OllamaDeadError:
+                return "⚠️ Study engine unavailable. Try again in 30s."
+            except asyncio.TimeoutError:
+                return "⏳ Q&A generation timed out. Try a simpler topic or fewer questions."
+
+            elapsed = time.time() - t0
+            logger.info("Q&A generated in %.1fs", elapsed)
+
+            if not answer_text or len(answer_text) < 50:
+                return "📭 *I couldn't generate meaningful Q&A pairs for this topic.*\n\nTry a different topic or check that your documents contain relevant material."
+
+            # Parse generated pairs into history
+            new_pairs = []
+            for line in answer_text.split("\n"):
+                line = line.strip()
+                if line.startswith("[") and "Q:" in line:
+                    q = line.split("Q:", 1)[1].strip()
+                    new_pairs.append({"q": q, "a": ""})
+                elif line.startswith("A:") and new_pairs:
+                    new_pairs[-1]["a"] = line.split("A:", 1)[1].strip()
+
+            # If parsing failed, store a single entry with full text
+            if not new_pairs:
+                new_pairs.append({"q": topic, "a": answer_text[:200]})
+
+            # Store in history
+            _qna_history[key] = existing + new_pairs
+            total_pairs = len(_qna_history[key])
+
+            # Build display text
+            header = f"📝 *Q&A: {topic}*"
+            if is_rerun:
+                header += f" (Part {len(existing)//count + 1} — {len(new_pairs)} new)"
+            else:
+                header += f" ({len(new_pairs)} pairs)"
+
+            lines = [header, ""]
+            for i, pair in enumerate(new_pairs, start_num):
+                q = pair.get("q", "")
+                a = pair.get("a", "")
+                lines.append(f"[{i}] Q: {q}")
+                lines.append(f"    A: {a}")
+                lines.append("")
+
+            # Footer
+            lines.append(f"_Total: {total_pairs} pairs across {total_pairs // count} session(s)_")
+            if not is_rerun:
+                lines.append("💡 *Want more?* Send `/qna " + topic + "` again for complementary questions!")
+
+            # Build follow-up (next-step + stats)
+            total_tokens = sum(len(t.split()) * 1.3 for t in chunk_texts)
+            follow_up = (
+                f"📊 *Retrieval:* {len(chunk_texts)} chunks | ~{int(total_tokens)} tokens | k=3\n"
+                f"📝 Generated: {len(new_pairs)} pairs in {elapsed:.1f}s"
+            )
+
+            processing = {
+                "follow_up": follow_up,
+                "elapsed_ms": elapsed * 1000,
+            }
+
+            from app.plugins.base import DispatchResult
+            return DispatchResult(reply="\n".join(lines), processing=processing)
+
+        except Exception as e:
+            logger.error("Q&A generation failed: %s", e, exc_info=True)
+            return f"⚠️ *Q&A generation failed:* `{str(e)[:300]}`"
 
     async def _handle_docs(self, ctx: BotContext) -> str:
         """Handle /docs — list indexed documents with full metadata."""
