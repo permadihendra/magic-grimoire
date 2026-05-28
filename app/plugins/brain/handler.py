@@ -566,20 +566,18 @@ class BrainPlugin(Plugin):
             progress.complete = True
             watcher.stop()
 
-            conv_text = "\n".join(conversational_parts).strip()
             tool_text = "\n\n".join(result_lines).strip()
-            final_reply = f"{conv_text}\n\n{tool_text}" if conv_text else tool_text
+            # Skip conversational text for RAG tools — already shown as thinking indicator
+            final_reply = tool_text
 
-            # Truncate if too long for Telegram (4096 char limit)
-            final_reply = _safe_truncate(final_reply)
+            if thinking_id and final_reply:
+                # Option B: send all chunks as new messages (don't edit thinking msg)
+                chunks = _split_into_chunks(final_reply)
+                for chunk in chunks:
+                    await asyncio.sleep(0.3)
+                    await _send_telegram_message(chat_id, chunk)
 
-            if thinking_id:
-                ok = await _edit_message(chat_id, thinking_id, final_reply)
-                if not ok:
-                    _remember(chat_id, message, final_reply)
-                    return final_reply
-
-            _remember(chat_id, message, final_reply)
+            _remember(chat_id, message, (final_reply or tool_text))
             return None
 
                 # ── 4b. Fast path — execute directly, return text ───
@@ -592,8 +590,12 @@ class BrainPlugin(Plugin):
             else:
                 result_lines.append(f"⚠️ Unknown tool: {t_name}")
 
-        conv_text = "\n".join(conversational_parts).strip()
         tool_text = "\n\n".join(result_lines).strip()
-        final_reply = f"{conv_text}\n\n{tool_text}" if conv_text else tool_text
+        # For RAG tools, skip conv_text (already shown as thinking). For chat(), conv_text IS the answer.
+        if any(t in _SLOW_TOOLS for t, _ in tool_tasks):
+            final_reply = tool_text
+        else:
+            conv_text = "\n".join(conversational_parts).strip()
+            final_reply = f"{conv_text}\n\n{tool_text}" if conv_text else tool_text
         _remember(chat_id, message, final_reply)
         return final_reply  # Fast path — gateway sends reply
