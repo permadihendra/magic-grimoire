@@ -18,41 +18,7 @@ _processed_updates: set[int] = set()
 MAX_PROCESSED = 100  # keep last 100 IDs to avoid unbounded memory
 
 
-def _build_status_footer(processing: dict | None = None) -> str:
-    """Build a processing status footer for long-running / resource-heavy operations.
-
-    Appended to query, quiz, and summarize responses.
-    Shows backend (GPU/CPU/Cache), chunk count, and elapsed time.
-    """
-    if not processing:
-        return ""
-
-    backend = processing.get("backend", "")
-    chunks = processing.get("chunks", 0)
-    cache_hit = processing.get("cache_hit", False)
-    elapsed_ms = processing.get("elapsed_ms", 0)
-
-    if cache_hit:
-        elapsed_s = elapsed_ms / 1000
-        return f"\n\n🟢 *Cache hit* · {elapsed_s:.1f}s"
-
-    # Backend emoji
-    backend_map = {
-        "gpu": ("🟢", "GPU"),
-        "cpu": ("🟡", "CPU"),
-        "fallback": ("🟡", "CPU"),
-        "unknown": ("⚪", "—"),
-        "cache": ("🟢", "Cache"),
-    }
-    emoji, label = backend_map.get(backend, ("⚪", backend or "—"))
-
-    elapsed_s = elapsed_ms / 1000
-    if chunks > 0:
-        return f"\n\n{emoji} *{label}* · {chunks} chunks · {elapsed_s:.1f}s"
-    return f"\n\n{emoji} *{label}* · {elapsed_s:.1f}s"
-
-
-async def _send_telegram_message(chat_id: int, text: str, keyboard=None) -> dict | None:
+async def _send_telegram_message(chat_id: int, text: str) -> dict | None:
     """Send a message via Telegram Bot API using raw httpx.
     Falls back to plain text if markdown causes 400 error.
     Returns response JSON (contains message_id) or None on failure.
@@ -60,18 +26,10 @@ async def _send_telegram_message(chat_id: int, text: str, keyboard=None) -> dict
     import httpx
 
     url = f"https://api.telegram.org/bot{settings.telegram_token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown",
-    }
-    if keyboard:
-        payload["reply_markup"] = json.loads(keyboard) if isinstance(keyboard, str) else keyboard
-
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.post(url, json=payload)
         if resp.status_code == 400:
-            logger.warning("Markdown send failed, retrying as plain text")
             payload.pop("parse_mode", None)
             resp = await client.post(url, json=payload)
         if resp.status_code == 200:
@@ -79,31 +37,6 @@ async def _send_telegram_message(chat_id: int, text: str, keyboard=None) -> dict
         else:
             logger.error("Send message failed: %s", resp.text)
             return None
-
-
-async def _edit_message_text(chat_id: int, message_id: int, text: str) -> bool:
-    """Edit a message's text. Returns True on success, False on failure."""
-    import httpx
-
-    url = f"https://api.telegram.org/bot{settings.telegram_token}/editMessageText"
-    payload = {
-        "chat_id": chat_id,
-        "message_id": message_id,
-        "text": text,
-        "parse_mode": "Markdown",
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(url, json=payload)
-            if resp.status_code == 400:
-                logger.warning("Markdown edit failed, retrying as plain text")
-                payload.pop("parse_mode", None)
-                resp = await client.post(url, json=payload)
-            return resp.status_code == 200
-    except Exception as e:
-        logger.warning("Failed to edit message %s: %s", message_id, e)
-        return False
 
 
 @router.post("/webhook")
@@ -154,12 +87,7 @@ async def webhook(request: Request) -> Response:
         return Response(status_code=200)
 
     log_text = message.text[:100] if has_text else f"[document: {message.document.file_name}]"
-    logger.info(
-        "Update %s from chat %s: %s",
-        update.update_id,
-        message.chat_id,
-        log_text,
-    )
+    logger.info("Update %s from chat %s: %s", update.update_id, message.chat_id, log_text)
 
     if not check_rate_limit(message.chat_id):
         await _send_telegram_message(
@@ -167,30 +95,24 @@ async def webhook(request: Request) -> Response:
         )
         return Response(status_code=200)
 
-    # Process — BrainPlugin manages thinking indicators internally for slow ops
-    from app.plugins.base import DispatchResult
+    # Process — plugins return string or DispatchResult
     try:
         import asyncio
-        result = await asyncio.wait_for(dispatch(update, None), timeout=300)
+        reply = await asyncio.wait_for(dispatch(update, None), timeout=300)
     except asyncio.TimeoutError:
         logger.error("Dispatch timed out after 300s")
-        result = DispatchResult(reply="⏳ Processing timed out after 5 minutes.\n"
-                               "Try a simpler or more specific question.")
+        reply = "⏳ Processing timed out after 5 minutes.\nTry a simpler or more specific question."
     except Exception as e:
         logger.error("Dispatch failed: %s", e, exc_info=True)
-        result = DispatchResult(reply="⚠️ Sorry, something went wrong processing your request.")
+        reply = "⚠️ Sorry, something went wrong processing your request."
 
-    reply = result.reply if isinstance(result, DispatchResult) else (result if isinstance(result, str) else None)
-    if not reply:
+    # Extract string from result (may be str or DispatchResult)
+    from app.plugins.base import DispatchResult
+    if isinstance(reply, DispatchResult):
+        reply = reply.reply
+    if not isinstance(reply, str) or not reply:
+        # Silent commands (like /index with inline edits) return None or empty
         return Response(status_code=200)
-    if isinstance(result, DispatchResult) and result.processing:
-        reply = reply + _build_status_footer(result.processing)
-    if not isinstance(reply, str):
-        logger.error("BUG: reply is not a string! type=%s value=%r", type(reply), reply)
-        return Response(status_code=500)
+
     await _send_telegram_message(message.chat_id, reply)
-
     return Response(status_code=200)
-
-
-

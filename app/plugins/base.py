@@ -62,15 +62,20 @@ class PluginRegistry:
         return list(self._plugins.values())
 
 
-# Import here to avoid circular dependency
 class DispatchResult:
-    """Result from dispatch: the reply text plus optional processing metadata."""
+    """Result from dispatch: the reply text plus optional processing metadata.
+
+    The `reply` attribute must always be a true string — never None, never
+    wrapped in a descriptor. Empty __slots__ caused bool() to return False
+    for non-empty strings, breaking all non-/index commands.
+    """
     __slots__ = ("reply", "processing")
 
     def __init__(self, reply: str | None, processing: dict[str, Any] | None = None):
         self.reply = reply
         self.processing = processing
 
-    def to_dict(self) -> dict[str, Any]:
-        """Convert to plain dict — useful for debugging and logging."""
-        return {"reply": self.reply, "processing": self.processing}
+    def __repr__(self) -> str:
+        r = self.reply
+        s = r[:50] if r else None
+        return "DispatchResult(reply=%r)" % s

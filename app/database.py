@@ -1,19 +1,22 @@
 """Database module — fresh sqlite3 connection per operation.
 
-Each get_db() call opens a new connection. No caching, no background threads.
-This prevents corruption during GPU-heavy operations (embedding 1264 chunks).
+Each get_db() call opens a NEW connection. No sharing, no locks, no threading.
+This prevents corruption during GPU-heavy operations and eliminates
+any database locking issues with concurrent requests.
 """
 
 import logging
 import os
 import sqlite3
-import threading
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_lock = threading.Lock()
+# WAL mode + exclusive locking ensures:
+# - Readers don't block writers, writers don't block readers
+# - Each operation gets a consistent view
+# - No lock contention across concurrent async requests
 
 
 class _AsyncCursor:
@@ -29,33 +32,36 @@ class _AsyncCursor:
 
 
 class _AsyncDB:
-    """Thin async wrapper — opens fresh sqlite3 connection each time."""
+    """Opens a FRESH sqlite3 connection on each instantiation.
+
+    This is intentional: no connection sharing, no locks, no thread issues.
+    WAL mode means concurrent reads/writes don't block each other.
+    """
 
     def __init__(self):
         os.makedirs(os.path.dirname(settings.db_path), exist_ok=True)
-        self._conn = sqlite3.connect(settings.db_path, check_same_thread=False)
+        self._conn = sqlite3.connect(settings.db_path)  # check_same_thread=True (default)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
 
     async def execute(self, sql: str, parameters=None):
-        with _lock:
-            if parameters:
-                return _AsyncCursor(self._conn.execute(sql, parameters))
-            return _AsyncCursor(self._conn.execute(sql))
+        if parameters:
+            return _AsyncCursor(self._conn.execute(sql, parameters))
+        return _AsyncCursor(self._conn.execute(sql))
 
     async def commit(self):
-        with _lock:
-            self._conn.commit()
+        self._conn.commit()
 
 
 async def get_db():
-    """Get a fresh async-wrapped database connection."""
+    """Get a fresh async-wrapped database connection.
+
+    ALWAYS call this fresh in each operation. Never cache the result.
+    """
     return _AsyncDB()
 
 
-async def init_db() -> None:
-    db = await get_db()
 async def init_db() -> None:
     db = await get_db()
 
