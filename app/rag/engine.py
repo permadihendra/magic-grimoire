@@ -507,28 +507,36 @@ class RAGEngine:
                         citations.append(f"{label} {short}")
             answer += "\n\n" + "\n".join(citations)
 
-        # --- Phase 4: Next-step suggestion (after answer, before citations) ---
-        answer += (
-            "\n\n💡 *Next steps:* Would you like a follow-up question, a `quiz` on this topic, "
+        # --- Build follow-up (separate message) ---
+        follow_up_parts = []
+
+        # Next-step suggestion
+        follow_up_parts.append(
+            "💡 *Next steps:* Would you like a follow-up question, a `quiz` on this topic, "
             "or a `summary` of the key points? Just ask!"
         )
 
-        # --- Diagnostics footer: chunk count + token size ---
+        # Diagnostics footer: chunk count + token size
         chunk_texts = [n.text for n in nodes if n.text]
         total_tokens = sum(len(t.split()) * 1.3 for t in chunk_texts)
         diag = (
-            f"\n\n📊 *Retrieval:* {len(chunk_texts)} chunks | "
+            f"📊 *Retrieval:* {len(chunk_texts)} chunks | "
             f"~{int(total_tokens)} tokens | k={settings.retrieval_top_k} | "
             f"ctx=2048"
         )
-        answer += diag
+        follow_up_parts.append(diag)
 
         if low_confidence and cited:
-            answer += (
-                "\n\n⚠️ *Low confidence* — your documents may not cover "
+            follow_up_parts.append(
+                "⚠️ *Low confidence* — your documents may not cover "
                 "this topic well. Try a different question or upload "
                 "relevant material."
             )
+
+        follow_up = "\n\n".join(follow_up_parts)
+
+        # Remove old next-step and diagnostics from answer (they were added earlier)
+        # We rebuild the answer to only include answer + citations
 
         # Store in knowledge cache for future queries
         if chat_id is not None and len(answer.strip()) >= 100:
@@ -551,5 +559,6 @@ class RAGEngine:
         return {
             "answer": answer,
             "sources": sources,
+            "follow_up": follow_up,
             "processing": {"backend": _backend(), "chunks": chunk_count, "cache_hit": False, "elapsed_ms": _total_ms},
         }

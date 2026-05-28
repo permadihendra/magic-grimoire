@@ -109,18 +109,25 @@ async def webhook(request: Request) -> Response:
 
     # Extract string from result (may be str or DispatchResult)
     from app.plugins.base import DispatchResult
+    result_processing = None
     if isinstance(reply, DispatchResult):
+        result_processing = reply.processing
         reply = reply.reply
     if not isinstance(reply, str) or not reply:
-        # Silent commands (like /index with inline edits) return None or empty
         return Response(status_code=200)
 
     # Split and send — handles Telegram's 4096 char limit
-    # For short messages, _split_into_chunks returns a single chunk
     chunks = _split_into_chunks(reply)
     for i, chunk in enumerate(chunks):
         await _send_telegram_message(message.chat_id, chunk)
         if i < len(chunks) - 1:
             await asyncio.sleep(0.3)
+
+    # Send follow-up (next-steps + diagnostics) as separate message
+    if result_processing:
+        follow_up = result_processing.get("follow_up")
+        if follow_up:
+            await asyncio.sleep(0.5)
+            await _send_telegram_message(message.chat_id, follow_up)
 
     return Response(status_code=200)

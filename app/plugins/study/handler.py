@@ -173,11 +173,16 @@ class StudyPlugin(Plugin):
 
         try:
             t0 = time.time()
-            response = await _rag_engine.query(question, mode="qa")
+            result = await _rag_engine.query_with_sources(question, mode="qa", difficulty="normal", chat_id=ctx.chat_id)
             elapsed = time.time() - t0
-
+            response_text = result.get("answer", "") if isinstance(result, dict) else str(result)
+            processing = {
+                "elapsed_ms": elapsed * 1000,
+                "follow_up": result.get("follow_up", "") if isinstance(result, dict) else "",
+            }
             logger.info("RAG query completed in %.1fs", elapsed)
-            return response
+            from app.plugins.base import DispatchResult
+            return DispatchResult(reply=response_text, processing=processing)
         except Exception as e:
             logger.error("RAG query failed: %s", e, exc_info=True)
             err_msg = str(e)
@@ -224,6 +229,7 @@ class StudyPlugin(Plugin):
                 "chunks": result.get("processing", {}).get("chunks", 0) if isinstance(result, dict) else 0,
                 "cache_hit": result.get("processing", {}).get("cache_hit", False) if isinstance(result, dict) else False,
                 "elapsed_ms": elapsed * 1000,
+                "follow_up": result.get("follow_up", "") if isinstance(result, dict) else "",
             }
             return DispatchResult(reply=response_text, processing=processing)
         except Exception as e:
@@ -262,6 +268,7 @@ class StudyPlugin(Plugin):
                 "chunks": result.get("processing", {}).get("chunks", 0) if isinstance(result, dict) else 0,
                 "cache_hit": result.get("processing", {}).get("cache_hit", False) if isinstance(result, dict) else False,
                 "elapsed_ms": elapsed * 1000,
+                "follow_up": result.get("follow_up", "") if isinstance(result, dict) else "",
             }
             return DispatchResult(reply=response_text, processing=processing)
         except Exception as e:
