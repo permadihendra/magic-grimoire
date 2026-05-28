@@ -208,7 +208,7 @@ class RAGEngine:
         from app.rag.guard import OllamaGuard, OllamaBusyError, OllamaDeadError
 
         try:
-            async with OllamaGuard("question answering", timeout=120):
+            async with OllamaGuard("question answering", timeout=180):
                 llm = get_llm()
                 from llama_index.core.response_synthesizers import TreeSummarize
                 synthesizer = TreeSummarize(llm=llm)
@@ -421,7 +421,7 @@ class RAGEngine:
             prompt_var = None
 
         try:
-            async with OllamaGuard("answer generation", timeout=120) as _guard:
+            async with OllamaGuard("answer generation", timeout=180) as _guard:
                 llm = get_llm()
                 logger.info("[%s]  [p2] LLM instance: %s", _qid, getattr(llm, 'model', '?'))
 
@@ -435,7 +435,7 @@ class RAGEngine:
                 _t2 = time.time()
                 response = await asyncio.wait_for(
                     synthesizer.aget_response(query_str=question, text_chunks=chunk_texts),
-                    timeout=60.0,  # 60s for synthesis (was 30s)
+                    timeout=120.0,  # 120s for synthesis (was 60s)
                 )
                 _gen_ms = (time.time()-_t2)*1000
                 answer = str(response)
