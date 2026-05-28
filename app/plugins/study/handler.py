@@ -327,48 +327,18 @@ class StudyPlugin(Plugin):
         from app.rag.prompts import get_qna_prompt
 
         try:
-            from app.rag.engine import shorten_filename
-
             t0 = time.time()
-
-            # Retrieve passages for context
-            passages = _rag_engine.retrieve_only(topic, chat_id=ctx.chat_id)
-            chunk_texts = [p["text"] for p in passages[:10]] if passages else []
-
-            if not chunk_texts:
-                return "📭 I couldn't find relevant passages on that topic. Try a different topic."
-
-            # Build prompt with existing pairs context
-            prompt = get_qna_prompt(count=count, existing_pairs=existing if is_rerun else None)
-
-            from app.rag.models import get_llm
-            from app.rag.guard import OllamaGuard, OllamaBusyError, OllamaDeadError
-
-            try:
-                async with OllamaGuard("qna generation", timeout=120):
-                    llm = get_llm()
-
-                    # Use direct prompt instead of TreeSummarize (avoids formatting interference)
-                    context_text = "\n\n".join(chunk_texts[:5])
-                    full_prompt = f"{prompt}\n\nContext from documents:\n{context_text}"
-
-                    response = await asyncio.wait_for(
-                        llm.acomplete(full_prompt),
-                        timeout=60.0,
-                    )
-                    answer_text = str(response).strip()
-
-            except OllamaBusyError:
-                return "⏳ Another operation is in progress. Try again shortly."
-            except OllamaDeadError:
-                return "⚠️ Study engine unavailable. Try again in 30s."
-            except asyncio.TimeoutError:
-                return "⏳ Q&A generation timed out. Try a simpler topic or fewer questions."
-
+            result = await _rag_engine.query_with_sources(
+                topic, mode="qna", count=count,
+                existing_pairs=existing if is_rerun else None,
+                chat_id=ctx.chat_id,
+            )
             elapsed = time.time() - t0
-            logger.info("Q&A generated in %.1fs", elapsed)
 
-            if not answer_text or len(answer_text) < 50:
+            answer_text = result.get("answer", "") if isinstance(result, dict) else str(result)
+            follow_up = result.get("follow_up", "") if isinstance(result, dict) else ""
+
+            if not answer_text or len(answer_text.strip()) < 50:
                 return "📭 *I couldn't generate meaningful Q&A pairs for this topic.*\n\nTry a different topic or check that your documents contain relevant material."
 
             # Count generated pairs via pattern matching (handles any format)
@@ -379,10 +349,8 @@ class StudyPlugin(Plugin):
             ))
             estimated = max(q_markers, 1)
 
-            # Store raw text instead of parsed pairs
+            # Store raw text in history
             new_pairs = [{"q": topic, "a": answer_text}]
-
-            # Store in history
             _qna_history[key] = existing + new_pairs
             total_pairs = len(existing) + estimated
 

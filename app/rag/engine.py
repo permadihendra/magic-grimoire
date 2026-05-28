@@ -232,7 +232,9 @@ class RAGEngine:
         difficulty: str = "normal",
         document: str | None = None,
         chat_id: int | None = None,
-        mode: str = "qa",  # "qa" | "quiz" | "summary"
+        mode: str = "qa",  # "qa" | "quiz" | "summary" | "qna"
+        count: int = 10,
+        existing_pairs: list[dict] | None = None,
     ) -> dict[str, Any]:
         """Query and return BOTH answer and source citations.
 
@@ -241,7 +243,9 @@ class RAGEngine:
             difficulty: 'simple', 'normal', or 'advanced'.
             document: Optional document name to boost scores for.
             chat_id: Telegram chat ID for feedback learning.
-            mode: 'qa', 'quiz', or 'summary' (controls prompt template).
+            mode: 'qa', 'quiz', 'summary', or 'qna' (controls prompt template).
+            count: Number of items for quiz/qna modes.
+            existing_pairs: Previous Q&A pairs for complement-on-rerun.
 
         Returns:
             Dict with 'answer' (str), 'sources' (list), and 'processing' (dict).
@@ -404,6 +408,10 @@ class RAGEngine:
         elif mode == "summary":
             from app.rag.prompts import SUMMARY_PROMPT
             prompt_template = SUMMARY_PROMPT
+            prompt_var = "query_str"
+        elif mode == "qna":
+            from app.rag.prompts import get_qna_prompt
+            prompt_template = get_qna_prompt(count=count, existing_pairs=existing_pairs)
             prompt_var = "query_str"
         else:  # qa
             prompt_template = None
