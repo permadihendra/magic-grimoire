@@ -411,7 +411,10 @@ class RAGEngine:
             prompt_var = "query_str"
         elif mode == "qna":
             from app.rag.prompts import get_qna_prompt
-            prompt_template = get_qna_prompt(count=count, existing_pairs=existing_pairs)
+            from llama_index.core.prompts import PromptTemplate
+            prompt_template = PromptTemplate(
+                get_qna_prompt(count=count, existing_pairs=existing_pairs)
+            )
             prompt_var = "query_str"
         else:  # qa
             prompt_template = None

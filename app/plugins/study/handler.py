@@ -913,3 +913,71 @@ async def summarize_topic(topic: str, chat_id: int | None = None) -> str:
     except Exception as e:
         logger.error("summarize_topic failed: %s", e, exc_info=True)
         return f"⚠️ Summary failed: {e}"
+
+
+async def generate_qna(topic: str, count: int = 10, chat_id: int | None = None) -> str:
+    """Generate comprehension Q&A pairs on a topic.
+
+    Args:
+        topic: Subject for Q&A pairs.
+        count: Number of pairs (3-20).
+        chat_id: Telegram chat ID for feedback learning.
+
+    Used by BrainPlugin's qna() tool.
+    """
+    global _rag_engine, _doc_indexer
+
+    if _rag_engine is None or _doc_indexer is None:
+        return "⚠️ RAG engine not initialized. Restart the bot."
+
+    try:
+        index = await _doc_indexer.ensure_index()
+        _rag_engine.set_index(index)
+
+        from app.database import get_db
+        db = await get_db()
+        cursor = await db.execute("SELECT COUNT(*) as cnt FROM documents")
+        row = await cursor.fetchone()
+        if not row or row["cnt"] == 0:
+            return "📭 No documents indexed yet! Run `/index` first."
+
+        logger.info("generate_qna: %s (count=%d)", topic[:80], count)
+        enhanced = f"Generate {count} Q&A pairs about: {topic}"
+
+        # Retrieve passages first (for source metadata)
+        passages = _rag_engine.retrieve_only(enhanced)
+        chunk_count = len(passages)
+
+        # Use engine's query_with_sources(mode="qna") — TreeSummarize flow
+        result = await _rag_engine.query_with_sources(
+            enhanced, mode="qna", count=count, chat_id=chat_id,
+        )
+        answer_text = result.get("answer", "") if isinstance(result, dict) else str(result)
+
+        # Append source metadata
+        if passages and answer_text:
+            short_names = []
+            seen = set()
+            for p in passages[:3]:
+                from app.rag.engine import _lookup_display_name
+                sn = _lookup_display_name(p["filename"])
+                if sn not in seen:
+                    seen.add(sn)
+                    short_names.append(sn)
+            if short_names:
+                src_line = "\n\n📖 *Sources used:* " + " · ".join(f"_{s}_" for s in short_names)
+                answer_text += src_line
+
+        answer_text += (
+            "\n\n💡 *Next steps:* Want more questions? Send "
+            f"`/qna {topic}` again for complementary pairs!"
+        )
+
+        answer_text += (
+            f"\n\n📊 *Retrieval:* {chunk_count} passages"
+        )
+
+        return answer_text
+    except Exception as e:
+        logger.error("generate_qna failed: %s", e, exc_info=True)
+        return f"⚠️ Q&A generation failed: {e}"

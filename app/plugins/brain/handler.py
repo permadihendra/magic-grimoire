@@ -83,6 +83,12 @@ Available tools:
   The tool output IS the summary.
   Do NOT write your own summary before this tool.
 
+- TOOL: qna(topic, count="10") — Generate comprehension Q&A pairs.
+  The tool output IS the Q&A pairs.
+  Do NOT write your own Q&A before this tool.
+  Use for: "create Q&A for exam prep", "test my understanding",
+  "give me practice questions with answers".
+
 - TOOL: list_docs() — List all indexed documents with details.
   Use for: "what docs do you have?", "show my documents".
 
@@ -275,6 +281,20 @@ async def _tool_summarize(topic: str, chat_id: int | None = None) -> str:
         return f"⚠️ Sorry, summary failed: {e}"
 
 
+async def _tool_qna(topic: str, count: str = "10", chat_id: int | None = None) -> str:
+    """Execute the qna() tool — generate comprehension Q&A pairs."""
+    from app.plugins.study.handler import generate_qna
+    try:
+        n = max(3, min(20, int(count)))
+    except (ValueError, TypeError):
+        n = 10
+    try:
+        return await generate_qna(topic, n, chat_id=chat_id)
+    except Exception as e:
+        logger.error("qna() failed: %s", e)
+        return f"⚠️ Sorry, Q&A generation failed: {e}"
+
+
 async def _tool_list_docs_v2() -> str:
     """Execute /docs — list indexed documents with full metadata."""
     from app.database import get_db
@@ -338,7 +358,7 @@ async def _tool_chat(text: str) -> str:
 
 
 # ── Slow tools (need thinking indicator) ─────────────────
-_SLOW_TOOLS = {"ask", "quiz", "summarize"}
+_SLOW_TOOLS = {"ask", "quiz", "summarize", "qna"}
 
 
 async def _progress_timer(chat_id: int, message_id: int,
@@ -406,6 +426,7 @@ _TOOL_REGISTRY = {
     "ask": _tool_ask,
     "quiz": _tool_quiz,
     "summarize": _tool_summarize,
+    "qna": _tool_qna,
     "list_docs": _tool_list_docs_v2,
     "chat": _tool_chat,
     "retrieve": _tool_retrieve,
