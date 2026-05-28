@@ -42,7 +42,7 @@ def get_llm() -> Ollama:
             request_timeout=timeout,
             temperature=0.0,
             context_window=2048,
-            num_predict=768,
+            num_predict=2048,
         )
     return _llm
 
