@@ -234,6 +234,8 @@ knowledge_pairs (
 |---|---|---|
 | `/ask <q>` | `StudyPlugin._handle_ask()` | Answer + source citations + next-step + diagnostics |
 | `/quiz <topic>` | `StudyPlugin._handle_quiz()` | Questions + sources + next-step + retrieval stats |
+| `/summarize <topic>` | `StudyPlugin._handle_summarize()` | Summary + sources + next-step + stats |
+| `/qna <topic>` | `StudyPlugin._handle_qna()` | Comprehension Q&A pairs (default 10) |
 | `/docs` | `StudyPlugin._handle_docs()` | Document library with word counts, parse methods, probe status |
 | `/index` | `StudyPlugin._handle_index()` | Pre-check → parse → embed → probe → per-file report |
 | `/files` | `StudyPlugin._handle_files()` | All files on disk with indexed status + metadata |
@@ -267,18 +269,19 @@ Quiz/summary add `📖 Sources used:` between answer and next-step.
 
 ```
 temperature=0.0          # Deterministic — defense in depth
-num_ctx=1024             # Halved KV cache → more VRAM headroom
-num_gpu=1                # Explicit for Q4_0 quantized model
-num_predict=128          # Limits response length (soft cap)
+num_ctx=2048             # Context window (API can extend to 4096)
+num_gpu=99               # All layers on GPU (power capped via MSI Afterburner)
+num_predict=2048         # Max output tokens (sent via API, overrides Modelfile)
 repeat_penalty=1.1       # Slight discourage of repetition
 num_thread=4             # CPU thread count
 ```
 
-**VRAM budget (RTX 3050 8GB):**
+**VRAM budget (RTX 3050 8GB, optimized):**
 - LLM weights: 1.9 GB
-- KV cache: ~1.2 GB (1024 ctx)
+- KV cache: ~2.4 GB (2048 ctx)
 - Embeddings (nomic): 0.3 GB
-- Headroom: ~4.6 GB
+- **Total: ~4.6 GB** (3.4 GB headroom)
+- Power capped at 80% via MSI Afterburner (~100W)
 
 ---
 
