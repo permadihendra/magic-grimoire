@@ -92,6 +92,43 @@ Same pattern for the fast path — if tool returns tuple, extract follow_up and 
 
 ---
 
+## Bonus: User-Friendly Footer (Words, Not Just Tokens)
+
+The diagnostics footer currently shows:
+```
+📊 Retrieval: 3 chunks | ~420 tokens | k=3 | ctx=4096
+```
+
+"Tokens" is meaningless to a non-technical user. Change to **words**:
+```
+📊 Retrieval: 3 passages | ~315 words | generated ~850 words
+```
+
+### Changes
+
+**`app/rag/engine.py`** — Footer construction (line ~517-521):
+```python
+# OLD (token-focused)
+diag = (
+    f"📊 *Retrieval:* {len(chunk_texts)} chunks | "
+    f"~{int(total_tokens)} tokens | k={settings.retrieval_top_k} | "
+    f"ctx=2048"
+)
+
+# NEW (word-focused)
+# 1 token ≈ 0.75 words for English
+word_count = len(answer.split()) if answer else 0
+diag = (
+    f"📊 *Retrieval:* {len(chunk_texts)} passages | "
+    f"~{int(total_tokens * 0.75)} source words | "
+    f"generated ~{word_count} words"
+)
+```
+
+Similarly for the follow-up sent by `_tool_ask` in brain handler — show word count of generated answer.
+
+---
+
 ## Files Changed
 
 | File | Lines | Change |
@@ -99,3 +136,4 @@ Same pattern for the fast path — if tool returns tuple, extract follow_up and 
 | `app/plugins/brain/handler.py` | ~238 | Remove `_send_telegram_message` from `_tool_ask`, return `(answer, follow_up)` tuple |
 | `app/plugins/brain/handler.py` | ~538-583 | Separate `follow_ups` list, send after main chunks |
 | `app/plugins/brain/handler.py` | ~590-600 | Same for fast path |
+| `app/rag/engine.py` | ~517-521 | Footer: tokens → words, add generated word count |
