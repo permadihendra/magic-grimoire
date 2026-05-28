@@ -424,7 +424,7 @@ class RAGEngine:
                 _t2 = time.time()
                 response = await asyncio.wait_for(
                     synthesizer.aget_response(query_str=question, text_chunks=chunk_texts),
-                    timeout=30.0,  # HARD CAP: 30s for synthesis
+                    timeout=60.0,  # 60s for synthesis (was 30s)
                 )
                 _gen_ms = (time.time()-_t2)*1000
                 answer = str(response)

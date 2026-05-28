@@ -652,7 +652,10 @@ async def ask_query(query: str, difficulty: str = "normal", document: str | None
         result = await _rag_engine.query_with_sources(query, difficulty=difficulty, document=document, chat_id=chat_id)
         logger.info("[%s]  q_with_sources done in %.0fms", _aqid, (_time_module.time()-_qws_t0)*1000)
         logger.info("[%s] >>> ask_query DONE (%.0fms total)", _aqid, (_time_module.time()-_aq_t0)*1000)
-        return result["answer"]
+        return {
+            "answer": result["answer"],
+            "follow_up": result.get("follow_up", ""),
+        }
     except Exception as e:
         logger.error("[%s] >>> ask_query CRASHED: %s", _aqid, e, exc_info=True)
         return f"\u26a0\ufe0f Query failed: {e}"

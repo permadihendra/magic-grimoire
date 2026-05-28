@@ -225,8 +225,16 @@ async def _tool_ask(query: str, difficulty: str = "normal", document: str | None
     """
     from app.plugins.study.handler import ask_query
     try:
-        result = await ask_query(query, difficulty=difficulty, document=document, chat_id=chat_id)
-        if not result or len(result.strip()) < 20:
+        result_dict = await ask_query(query, difficulty=difficulty, document=document, chat_id=chat_id)
+        if isinstance(result_dict, dict):
+            answer = result_dict.get("answer", "")
+            follow_up = result_dict.get("follow_up", "")
+        else:
+            # Backwards compat: ask_query might return string from early error paths
+            answer = result_dict if isinstance(result_dict, str) else ""
+            follow_up = ""
+
+        if not answer or len(answer.strip()) < 20:
             return (
                 "📭 *I searched your documents but couldn't find a good answer.*\n\n"
                 "Suggestions:\n"
@@ -235,7 +243,13 @@ async def _tool_ask(query: str, difficulty: str = "normal", document: str | None
                 "• Use `/files` to check your available docs\n"
                 "• Run `/index` if you recently added files"
             )
-        return result
+
+        # Send follow-up (next-steps + diagnostics) as a separate message
+        if follow_up and chat_id:
+            await asyncio.sleep(0.5)
+            await _send_telegram_message(chat_id, follow_up)
+
+        return answer
     except Exception as e:
         logger.error("ask() failed: %s", e)
         return f"⚠️ Sorry, I couldn't find an answer.\n\nError: {e}"
