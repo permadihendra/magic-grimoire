@@ -141,11 +141,11 @@ Guidelines:
 - Number each pair as [1], [2], etc.
 
 Format:
-[1] Q: What is the concept of dharma in the Bhagavad Gita?
-    A: Dharma refers to righteous duty... (2-4 sentences)
+[1] Q: [Clear question about the topic from the documents]
+    A: [Complete answer based only on the provided context]
 
-[2] Q: How does Krishna define karma yoga?
-    A: Karma yoga is the path of selfless action...
+[2] Q: [Another question on a different aspect of the topic]
+    A: [Answer with details from the provided context]
 
 - Vary your questions between sessions. Use different scenarios,
   examples, and emphasis. Don't repeat the same Q&A pairs.

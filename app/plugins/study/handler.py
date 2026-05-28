@@ -310,10 +310,30 @@ class StudyPlugin(Plugin):
             return error
 
         logger.info("Generating %d Q&A pairs on: %s", count, topic)
-        await self._progress(ctx, f"📝 Generating {count} Q&A pairs...")
+        await self._progress(ctx, "🔍 Searching documents for relevant passages...")
 
         try:
             t0 = time.time()
+
+            # Pre-retrieve passages to show preview (fast)
+            preview_passages = _rag_engine.retrieve_only(topic, chat_id=ctx.chat_id)
+            if preview_passages:
+                from app.rag.engine import _lookup_display_name
+                seen = set()
+                names = []
+                for p in preview_passages[:3]:
+                    sn = _lookup_display_name(p["filename"])
+                    if sn not in seen:
+                        seen.add(sn)
+                        names.append(f"{sn} ({p['score']:.2f})")
+                if names:
+                    preview = "🔍 *Found passages:* " + " · ".join(names)
+                    await self._progress(ctx, f"{preview}\n🧠 Generating {count} Q&A pairs...")
+                else:
+                    await self._progress(ctx, f"📝 Generating {count} Q&A pairs...")
+            else:
+                await self._progress(ctx, f"📝 Generating {count} Q&A pairs...")
+
             result = await _rag_engine.query_with_sources(
                 topic, mode="qna", count=count,
                 chat_id=ctx.chat_id,
