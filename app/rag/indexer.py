@@ -36,6 +36,8 @@ INDEX_STORAGE_DIR = os.path.join(os.path.dirname(settings.db_path), "index_stora
 
 # ── Dataclass: parse result ───────────────────────────────
 
+PARSE_TIMEOUT = 30  # seconds per parser method
+
 @dataclass
 class ParseResult:
     """Result of parsing a document."""
