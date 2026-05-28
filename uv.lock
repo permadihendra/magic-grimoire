@@ -1409,12 +1409,14 @@ source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "liteparse" },
     { name = "llama-index" },
     { name = "llama-index-embeddings-huggingface" },
     { name = "llama-index-embeddings-ollama" },
     { name = "llama-index-llms-ollama" },
     { name = "llama-index-readers-file" },
     { name = "numpy" },
+    { name = "poppler-utils" },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
     { name = "python-telegram-bot" },
@@ -1444,6 +1446,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.111" },
     { name = "html2text", marker = "extra == 'epub'", specifier = ">=2020.1.16" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "liteparse", specifier = ">=2.0.0" },
     { name = "liteparse", marker = "extra == 'liteparse'" },
     { name = "llama-index", specifier = ">=0.12" },
     { name = "llama-index-embeddings-huggingface", specifier = ">=0.2" },
@@ -1452,6 +1455,7 @@ requires-dist = [
     { name = "llama-index-readers-file", specifier = ">=0.4" },
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "numpy", specifier = ">=1.26" },
+    { name = "poppler-utils", specifier = ">=0.1.0" },
     { name = "pydantic-settings", specifier = ">=2.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
@@ -2228,6 +2232,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
+]
+
+[[package]]
+name = "poppler-utils"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "click" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/fd/c8/2f212ff8f556fee8836a031cdcdac0781d419a9f3f5eb58a71a57e4ae3e7/poppler-utils-0.1.0.tar.gz", hash = "sha256:e97a92dcfde57b21a90c3070694e58f8eea155515ae8e624266a052d0776a349", size = 2148, upload-time = "2020-10-06T16:17:34.715Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/38/35/ea3b85d1f705294ccf7de579d8e16143599a1c69d2fc2525fac364d24b11/poppler_utils-0.1.0-py3-none-any.whl", hash = "sha256:a6336b4c7d59e49d339b92c60d1f63905f577ab106038bde940a6861deefd3f3", size = 9180, upload-time = "2020-10-06T16:17:31.758Z" },
 ]
 
 [[package]]

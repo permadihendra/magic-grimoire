@@ -18,6 +18,8 @@ dependencies = [
     "llama-index-readers-file>=0.4",
     "sentence-transformers>=2.7",
     "torch>=2.2",
+    "liteparse>=2.0.0",
+    "poppler-utils>=0.1.0",
 ]
 
 [project.optional-dependencies]

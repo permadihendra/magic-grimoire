@@ -41,6 +41,13 @@ elif [ -d "/usr/share/tesseract-ocr/4/tessdata" ]; then
     export TESSDATA_PREFIX="/usr/share/tesseract-ocr/4/tessdata"
 fi
 
+# LiteParse (Rust tesseract) looks in ~/.tesseract-rs/tessdata/, not TESSDATA_PREFIX
+_LP_TESSDATA="${HOME}/.tesseract-rs/tessdata"
+if [ -d "$TESSDATA_PREFIX" ] && [ ! -f "${_LP_TESSDATA}/eng.traineddata" ]; then
+    mkdir -p "${_LP_TESSDATA}"
+    ln -sf "${TESSDATA_PREFIX}/eng.traineddata" "${_LP_TESSDATA}/eng.traineddata" 2>/dev/null || true
+fi
+
 # ── Colors ────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
