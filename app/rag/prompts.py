@@ -129,9 +129,14 @@ Format cleanly in Markdown for Telegram.
 
 QNA_PROMPT = """You are an exam preparation tutor. Based on the provided context from the user's study documents, generate {count} question + answer pairs for comprehension testing.
 
+Topic: {{query_str}}
+
 {personality}
 
 {existing_block}
+
+Context from the user's documents:
+{{context_str}}
 
 Guidelines:
 - Each pair: Q: [question] then A: [answer] on the next line
