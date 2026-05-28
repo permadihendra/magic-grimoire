@@ -11,6 +11,7 @@ Features:
 - Difficulty levels (simple/normal/advanced)
 """
 
+import asyncio
 import logging
 import re
 from collections import defaultdict

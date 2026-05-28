@@ -404,7 +404,10 @@ class DocumentIndexer:
             try:
                 with open(fpath, "rb") as f:
                     raw_bytes = f.read()
-                result = parse_document_multimethod(fpath, fname, raw_bytes)
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(parse_document_multimethod, fpath, fname, raw_bytes),
+                    timeout=PARSE_TIMEOUT,
+                )
                 results.append((fname, result))
             except Exception as e:
                 results.append((fname, ParseResult(
@@ -420,7 +423,10 @@ class DocumentIndexer:
         try:
             with open(fpath, "rb") as f:
                 raw_bytes = f.read()
-            return parse_document_multimethod(fpath, fname, raw_bytes)
+            return await asyncio.wait_for(
+                asyncio.to_thread(parse_document_multimethod, fpath, fname, raw_bytes),
+                timeout=PARSE_TIMEOUT,
+            )
         except Exception as e:
             return ParseResult(success=False, method="none", word_count=0, char_count=0,
                                error=f"read error: {e}")
@@ -461,7 +467,10 @@ class DocumentIndexer:
             try:
                 with open(fpath, "rb") as f:
                     raw_bytes = f.read()
-                result = parse_document_multimethod(fpath, fname, raw_bytes)
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(parse_document_multimethod, fpath, fname, raw_bytes),
+                    timeout=PARSE_TIMEOUT,
+                )
                 self._parse_results.append(result)
 
                 if result.success and result.doc:
