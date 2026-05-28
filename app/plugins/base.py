@@ -63,19 +63,11 @@ class PluginRegistry:
 
 
 class DispatchResult:
-    """Result from dispatch: the reply text plus optional processing metadata.
-
-    The `reply` attribute must always be a true string — never None, never
-    wrapped in a descriptor. Empty __slots__ caused bool() to return False
-    for non-empty strings, breaking all non-/index commands.
-    """
-    __slots__ = ("reply", "processing")
-
+    """Result from dispatch: the reply text plus optional processing metadata."""
     def __init__(self, reply: str | None, processing: dict[str, Any] | None = None):
         self.reply = reply
         self.processing = processing
 
     def __repr__(self) -> str:
-        r = self.reply
-        s = r[:50] if r else None
+        s = self.reply[:50] if self.reply else None
         return "DispatchResult(reply=%r)" % s

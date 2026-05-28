@@ -740,7 +740,7 @@ async def generate_quiz(topic: str, count: int = 5, difficulty: str = "normal", 
         return f"⚠️ Quiz generation failed: {e}"
 
 
-async def summarize_topic(topic: str) -> str:
+async def summarize_topic(topic: str, chat_id: int | None = None) -> str:
     """Generate a summary of a topic.
 
     Used by BrainPlugin's summarize() tool.
@@ -762,7 +762,7 @@ async def summarize_topic(topic: str) -> str:
             return "📭 No documents indexed yet! Run `/index` first."
 
         logger.info("summarize_topic: %s", topic[:80])
-        passages = _rag_engine.retrieve_only(topic)
+        passages = _rag_engine.retrieve_only(topic, chat_id=chat_id)
         chunk_count = len(passages)
         total_tokens = sum(len(p["text"].split()) * 1.3 for p in passages) if passages else 0
 

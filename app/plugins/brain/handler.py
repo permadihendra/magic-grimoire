@@ -253,11 +253,11 @@ async def _tool_quiz(topic: str, count: str = "5", difficulty: str = "normal", c
         return f"⚠️ Sorry, quiz generation failed: {e}"
 
 
-async def _tool_summarize(topic: str) -> str:
+async def _tool_summarize(topic: str, chat_id: int | None = None) -> str:
     """Execute the summarize() tool — topic summary."""
     from app.plugins.study.handler import summarize_topic
     try:
-        return await summarize_topic(topic)
+        return await summarize_topic(topic, chat_id=chat_id)
     except Exception as e:
         logger.error("summarize() failed: %s", e)
         return f"⚠️ Sorry, summary failed: {e}"

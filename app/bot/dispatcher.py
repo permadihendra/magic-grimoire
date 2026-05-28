@@ -4,27 +4,15 @@ Handles:
 - Document uploads → confirm → save → index
 - Slash commands → plugin
 - Free text → BrainPlugin (Gemini agent)
-
-All plugins return: DispatchResult(reply, processing_metadata | None)
-Processing metadata dict: {backend, chunks, cache_hit, elapsed_ms}
 """
 
 import logging
 import os
-from dataclasses import dataclass
-from typing import Any
 
 from app.config import settings
-from app.plugins.base import PluginRegistry
+from app.plugins.base import PluginRegistry, DispatchResult
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class DispatchResult:
-    """Result from dispatch: the reply text plus optional processing metadata."""
-    reply: str | None
-    processing: dict[str, Any] | None = None
 
 
 # ── Pending file confirmations ───────────────────────────
