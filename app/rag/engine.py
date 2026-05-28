@@ -270,22 +270,9 @@ class RAGEngine:
             except Exception as e:
                 logger.warning("[%s]  index health check failed: %s", _qid, e)
 
-        # --- Phase 0: Knowledge cache check ---
-        if chat_id is not None:
-            try:
-                from app.rag.knowledge_cache import search_cache
-                cached = await search_cache(question, document, chat_id)
-                if cached and cached["similarity"] >= 0.92:
-                    return {
-                        "answer": cached["full_answer"],
-                        "sources": [{
-                            "filename": cached.get("source_doc", "Unknown"),
-                            "score": cached["similarity"],
-                        }],
-                        "processing": {"backend": "cache", "chunks": 0, "cache_hit": True, "elapsed_ms": (time.time()-_t0)*1000},
-                    }
-            except Exception as e:
-                logger.debug("Cache check failed: %s", e)
+        # --- Phase 0: Knowledge cache check (DISABLED — fresh generation every query) ---
+        # Cache was removed because repeated questions returned identical answers.
+        # Telegram already stores conversation history.
 
         # --- Phase 1: Sync retrieval with document boosting + feedback ---
         retriever = self._get_retriever()
@@ -551,19 +538,8 @@ class RAGEngine:
         # Remove old next-step and diagnostics from answer (they were added earlier)
         # We rebuild the answer to only include answer + citations
 
-        # Store in knowledge cache for future queries
-        if chat_id is not None and len(answer.strip()) >= 100:
-            try:
-                from app.rag.knowledge_cache import store_pair
-                import asyncio as _asyncio
-                _asyncio.create_task(
-                    store_pair(question, answer, 
-                               source_doc=sources[0]["filename"] if sources else None,
-                               retrieval_score=top_score,
-                               chat_id=chat_id, approved=False)
-                )
-            except Exception as e:
-                logger.debug("Cache store failed: %s", e)
+        # Knowledge cache disabled — fresh generation every query.
+        # Telegram stores conversation history; no need for duplicate cache.
 
         _total_ms = (time.time()-_t0)*1000
         logger.info("[%s] >>> q_with_sources DONE %d chars (%.0fms total)",

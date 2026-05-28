@@ -31,10 +31,6 @@ logger = logging.getLogger(__name__)
 _rag_engine: RAGEngine | None = None
 _doc_indexer: DocumentIndexer | None = None
 
-# ── QnA history (complement-on-rerun) ───────────────────
-# key: (chat_id, topic_lower) → [{"q": ..., "a": ...}, ...]
-_qna_history: dict[tuple[int, str], list[dict]] = {}
-
 
 class StudyPlugin(Plugin):
     name = "study"
@@ -286,15 +282,13 @@ class StudyPlugin(Plugin):
     async def _handle_qna(self, ctx: BotContext) -> str | DispatchResult:
         """Handle /qna <topic> — generate comprehension Q&A pairs.
 
-        First call generates 10 Q&A pairs.
-        Second call on same topic generates 10 NEW pairs that complement.
+        Each call generates fresh Q&A pairs. No caching or history.
         """
-        global _rag_engine, _doc_indexer, _qna_history
+        global _rag_engine, _doc_indexer
 
         # Parse args
         text = ctx.message_text.strip()
         topic = text[len("/qna"):].strip()
-        # Parse optional count (e.g. "/qna krishna 15")
         count = 10
         if topic:
             parts = topic.rsplit(None, 1)
@@ -315,22 +309,13 @@ class StudyPlugin(Plugin):
         if error:
             return error
 
-        # Check for existing Q&A on this topic (complement-on-rerun)
-        key = (ctx.chat_id, topic.lower())
-        existing = _qna_history.get(key, [])
-        is_rerun = len(existing) > 0
-        start_num = len(existing) + 1  # numbering continues
-
-        logger.info("Generating %d Q&A on: %s (rerun=%s, existing=%d)", count, topic, is_rerun, len(existing))
-        await self._progress(ctx, f"📝 Generating {count} Q&A pairs" + (" (complementing previous)..." if is_rerun else "..."))
-
-        from app.rag.prompts import get_qna_prompt
+        logger.info("Generating %d Q&A pairs on: %s", count, topic)
+        await self._progress(ctx, f"📝 Generating {count} Q&A pairs...")
 
         try:
             t0 = time.time()
             result = await _rag_engine.query_with_sources(
                 topic, mode="qna", count=count,
-                existing_pairs=existing if is_rerun else None,
                 chat_id=ctx.chat_id,
             )
             elapsed = time.time() - t0
@@ -341,7 +326,7 @@ class StudyPlugin(Plugin):
             if not answer_text or len(answer_text.strip()) < 50:
                 return "📭 *I couldn't generate meaningful Q&A pairs for this topic.*\n\nTry a different topic or check that your documents contain relevant material."
 
-            # Count generated pairs via pattern matching (handles any format)
+            # Count generated pairs via pattern matching
             import re
             q_markers = len(re.findall(
                 r'(?:^|\n)\s*(?:\[\d+\]|Q\d*[:.]|Question\s*\d*[:.]|^\d+[.])',
@@ -349,29 +334,16 @@ class StudyPlugin(Plugin):
             ))
             estimated = max(q_markers, 1)
 
-            # Store raw text in history
-            new_pairs = [{"q": topic, "a": answer_text}]
-            _qna_history[key] = existing + new_pairs
-            total_pairs = len(existing) + estimated
-
-            # Build display text — show raw model output directly
+            # Build display text — fresh results every time
             header = f"📝 *Q&A: {topic}* (est. {estimated} pairs)"
-            if is_rerun:
-                header += f" — Part {len(existing)//count + 1}"
-
             lines = [header, "", answer_text, ""]
 
-            # Footer
-            lines.append(f"_Total: {total_pairs} pairs across {total_pairs // count} session(s)_")
-            if not is_rerun:
-                lines.append("💡 *Want more?* Send `/qna " + topic + "` again for complementary questions!")
+            # Footer — fresh generation info
+            lines.append(f"_Generated ~{estimated} new pairs_")
+            lines.append("💡 *Want more?* Send `/qna " + topic + "` again for fresh questions!")
 
-            # Build follow-up (next-step + stats)
-            total_tokens = sum(len(t.split()) * 1.3 for t in chunk_texts)
-            follow_up = (
-                f"📊 *Retrieval:* {len(chunk_texts)} chunks | ~{int(total_tokens)} tokens | k=3\n"
-                f"📝 Generated: ~{estimated} pairs in {elapsed:.1f}s"
-            )
+            # Build follow-up (retrieval stats from engine)
+            follow_up = result.get("follow_up", "") if isinstance(result, dict) else ""
 
             processing = {
                 "follow_up": follow_up,

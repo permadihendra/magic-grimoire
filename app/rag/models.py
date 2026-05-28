@@ -35,12 +35,12 @@ def get_llm() -> Ollama:
             timeout,
         )
         # Optimized for 8 GB VRAM (RTX 3050): Q4_0 quant + 4K context
-        # temperature 0.0 = deterministic (also set in Modelfile — defense in depth)
+        # temperature 0.1 = slight variation for repeated questions (was 0.0)
         _llm = Ollama(
             model=settings.ollama_llm_model,
             base_url=settings.ollama_base_url,
             request_timeout=timeout,
-            temperature=0.0,
+            temperature=0.1,
             context_window=2048,
             additional_kwargs={
                 "num_predict": 2048,   # actually passed to Ollama API (not silently dropped)

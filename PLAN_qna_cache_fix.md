@@ -5,66 +5,54 @@
 
 ---
 
-## Root Cause: Two Caching Layers
+## Root Cause: Knowledge Cache Returns Same Answer
 
-### Layer 1: Knowledge Cache (engine.py:276-278)
+`engine.py:276-278` checks the knowledge cache before every query:
 
 ```python
 cached = await search_cache(question, document, chat_id)
 if cached and cached["similarity"] >= 0.92:
-    return cached["full_answer"]  # ← NO LLM CALL, returns cached answer
+    return cached["full_answer"]  # ← NO LLM CALL
 ```
 
-For QnA, the question passed to the engine is:
-```
-"Generate 10 Q&A pairs about: krishna teachings"
-```
+For QnA, the question string is identical every time → cache hit → same result.
+For `/ask`, similar questions get matched by embedding → cached result, no fresh generation.
 
-This is the **exact same string** every time. Cache similarity is 1.0 (identical) → returns cached answer immediately. Model never runs.
+The user's logic: Telegram already stores the conversation history. If the user asks the same question twice, they can scroll up. No need for a cache that returns stale answers.
 
-**Affects:** `/qna krishna teachings` → cache hit → same result every time.
+## Fix: Remove Knowledge Cache from All Queries
 
-### Layer 2: `_qna_history` (study/handler.py:320-354)
-
-Even if cache is bypassed, `_qna_history` stores previous pairs and includes them in the prompt as "do NOT repeat" context. The user explicitly said this is backfiring.
+Remove the cache check **and** cache store from `query_with_sources()` entirely. The cache system (`knowledge_cache.py`) stays for potential future use but is no longer consulted.
 
 ---
 
-## Fix: Remove Both Caching Layers for QnA
+## Fix: Remove Knowledge Cache from All Queries﻿
 
-### Change 1: Skip knowledge cache in QnA mode
-
-```python
-# engine.py:276 — add mode check
-if chat_id is not None and mode != "qna":  # ← skip cache for QnA
-    from app.rag.knowledge_cache import search_cache
-    cached = await search_cache(question, document, chat_id)
-    ...
-```
-
-### Change 2: Skip cache storage in QnA mode
+### Change 1: Remove cache check (engine.py:276-278)
 
 ```python
-# engine.py:557 — add mode check
-if chat_id is not None and len(answer.strip()) >= 100 and mode != "qna":
-    asyncio.create_task(store_pair(...))
+# REMOVE these 3 lines:
+from app.rag.knowledge_cache import search_cache
+cached = await search_cache(question, document, chat_id)
+if cached and cached["similarity"] >= 0.92:
+    return { "answer": cached["full_answer"], ... }
 ```
 
-### Change 3: Remove `_qna_history` entirely
-
-Delete the module-level dict, history check, and storage in `_handle_qna`. Every `/qna` call generates fresh independent results.
+### Change 2: Remove cache store (engine.py:557-560)
 
 ```python
-# REMOVE these from study/handler.py:
-# Line 36: _qna_history: dict[tuple[int, str], list[dict]] = {}
-# Line 292: global ... _qna_history
-# Line 320: existing = _qna_history.get(key, [])
-# Line 354: _qna_history[key] = existing + new_pairs
+# REMOVE these ~8 lines:
+if chat_id is not None and len(answer.strip()) >= 100:
+    try:
+        from app.rag.knowledge_cache import store_pair
+        asyncio.create_task(store_pair(...))
+    except Exception:
+        pass
 ```
 
-### Change 4: Update `get_qna_prompt()` — remove existing_pairs param
+### Change 3: Remove `_qna_history` (study/handler.py)
 
-Since `existing_pairs` is never used, simplify the prompt template.
+Remove module-level dict, history check, and storage. Every call is fresh.
 
 ---
 
@@ -72,11 +60,9 @@ Since `existing_pairs` is never used, simplify the prompt template.
 
 | File | Change |
 |---|---|
-| `app/rag/engine.py:276` | Add `mode != "qna"` to cache check |
-| `app/rag/engine.py:557` | Add `mode != "qna"` to cache store |
-| `app/plugins/study/handler.py` | Remove `_qna_history`, history check, history storage |
-
-No change to `prompts.py` (existing_pairs param still accepted but never passed — harmless).
+| `app/rag/engine.py:276-281` | Remove cache check block |
+| `app/rag/engine.py:557-565` | Remove cache store block |
+| `app/plugins/study/handler.py` | Remove `_qna_history` (history check, storage) |
 
 ---
 
