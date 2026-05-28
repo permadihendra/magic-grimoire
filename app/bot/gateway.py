@@ -1,3 +1,4 @@
+import asyncio
 import hmac
 import json
 import logging
@@ -8,6 +9,7 @@ from telegram import Update
 from app.bot.dispatcher import dispatch
 from app.bot.middlewares import check_rate_limit
 from app.config import settings
+from app.ui.helpers import _split_into_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +99,6 @@ async def webhook(request: Request) -> Response:
 
     # Process — plugins return string or DispatchResult
     try:
-        import asyncio
         reply = await asyncio.wait_for(dispatch(update, None), timeout=300)
     except asyncio.TimeoutError:
         logger.error("Dispatch timed out after 300s")
@@ -114,5 +115,12 @@ async def webhook(request: Request) -> Response:
         # Silent commands (like /index with inline edits) return None or empty
         return Response(status_code=200)
 
-    await _send_telegram_message(message.chat_id, reply)
+    # Split and send — handles Telegram's 4096 char limit
+    # For short messages, _split_into_chunks returns a single chunk
+    chunks = _split_into_chunks(reply)
+    for i, chunk in enumerate(chunks):
+        await _send_telegram_message(message.chat_id, chunk)
+        if i < len(chunks) - 1:
+            await asyncio.sleep(0.3)
+
     return Response(status_code=200)

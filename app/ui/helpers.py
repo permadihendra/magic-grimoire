@@ -223,3 +223,53 @@ def _build_total_footer(
         footer += f"\n_~{total_words:,} words across all materials_"
 
     return footer
+
+
+# ── Message splitter (Telegram 4096 char limit) ──────────
+
+
+def _split_into_chunks(text: str, max_len: int = 4000) -> list[str]:
+    """Split long text into chunks that fit Telegram's message limit.
+
+    Each chunk is at most max_len characters. Non-first chunks get a
+    continuation prefix, non-last chunks get a continuation suffix.
+    Splits at paragraph boundaries where possible, otherwise at
+    newlines, otherwise at spaces.
+    """
+    if not text:
+        return [""]
+    if len(text) <= max_len:
+        return [text]
+
+    chunks = []
+    remaining = text
+
+    while remaining:
+        if len(remaining) <= max_len:
+            chunks.append(remaining)
+            break
+
+        # Try to split at paragraph boundary (double newline)
+        cut = remaining.rfind("\n\n", 0, max_len)
+        if cut < max_len // 2:
+            # Try single newline
+            cut = remaining.rfind("\n", 0, max_len)
+        if cut < max_len // 2:
+            # Try space
+            cut = remaining.rfind(" ", 0, max_len)
+        if cut < max_len // 2:
+            # Hard cut at max_len
+            cut = max_len
+
+        chunk = remaining[:cut].strip()
+        remaining = remaining[cut:].strip()
+
+        # Add continuation markers
+        if chunks:
+            chunk = "_continued from above_\n\n" + chunk
+        if remaining:
+            chunk += "\n\n_continued..._"
+
+        chunks.append(chunk)
+
+    return chunks

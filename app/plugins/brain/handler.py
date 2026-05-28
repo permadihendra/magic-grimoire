@@ -18,6 +18,7 @@ from collections import defaultdict
 from app.config import settings
 from app.llm.gemini import gemini_chat
 from app.plugins.base import BotContext, Plugin
+from app.ui.helpers import _split_into_chunks
 
 logger = logging.getLogger(__name__)
 
