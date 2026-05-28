@@ -334,6 +334,7 @@ num_thread=4             # CPU thread count
 ```bash
 bash app/start-bot.sh            # Always use this — manages cloudflared tunnel
 bash app/stop-bot.sh             # Kill all bot processes cleanly
+bash app/dependency-check.sh     # Verify all deps (--fix to auto-install)
 uv sync                          # Install deps
 uv sync --extra epub             # Install EPUB support (ebooklib + html2text)
 uv sync --extra dev              # Install dev deps
