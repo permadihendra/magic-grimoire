@@ -9,7 +9,7 @@ FROM qwen2.5:3b
 PARAMETER num_ctx 2048
 
 # ── GPU — explicit 1 layer (quantized models = single layer) ─
-PARAMETER num_gpu 12
+PARAMETER num_gpu 99
 PARAMETER num_batch 512
 PARAMETER repeat_penalty 1.1
 
