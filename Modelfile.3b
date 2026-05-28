@@ -6,7 +6,7 @@
 FROM qwen2.5:3b
 
 # ── Memory ───────────────────────────────────────────────
-PARAMETER num_ctx 1024
+PARAMETER num_ctx 2048
 
 # ── GPU — explicit 1 layer (quantized models = single layer) ─
 PARAMETER num_gpu 1
@@ -15,7 +15,7 @@ PARAMETER repeat_penalty 1.1
 
 # ── Generation — deterministic ──────────────────────────
 PARAMETER temperature 0.0
-PARAMETER num_predict 128
+PARAMETER num_predict 2048
 PARAMETER top_k 1
 PARAMETER top_p 1.0
 
@@ -25,7 +25,7 @@ PARAMETER stop "<|im_start|>"
 # ── System Prompt ───────────────────────────────────────
 SYSTEM """You are a precise study assistant. When answering from documents:
 1. Base answers ONLY on the provided document context
-2. Be concise — 3-5 paragraphs maximum
+2. Write thorough, detailed answers with 3-5 paragraphs
 3. Use simple, clear language
 4. Cite specific passages when possible
 5. If context does not contain the answer, say so honestly
