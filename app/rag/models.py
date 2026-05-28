@@ -41,7 +41,7 @@ def get_llm() -> Ollama:
             base_url=settings.ollama_base_url,
             request_timeout=timeout,
             temperature=0.1,
-            context_window=2048,
+            context_window=4096,
             additional_kwargs={
                 "num_predict": 2048,   # actually passed to Ollama API (not silently dropped)
                 "num_ctx": 4096,        # more headroom for long answers

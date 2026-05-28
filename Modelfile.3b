@@ -6,7 +6,7 @@
 FROM qwen2.5:3b
 
 # ── Memory ───────────────────────────────────────────────
-PARAMETER num_ctx 2048
+PARAMETER num_ctx 4096
 
 # ── GPU — explicit 1 layer (quantized models = single layer) ─
 PARAMETER num_gpu 99
