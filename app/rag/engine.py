@@ -519,9 +519,11 @@ class RAGEngine:
         # Diagnostics footer: chunk count + token size
         chunk_texts = [n.text for n in nodes if n.text]
         total_tokens = sum(len(t.split()) * 1.3 for t in chunk_texts)
+        total_words = int(total_tokens * 0.75)  # ~0.75 words per token
         diag = (
             f"📊 *Retrieval:* {len(chunk_texts)} chunks | "
-            f"~{int(total_tokens)} tokens | k={settings.retrieval_top_k} | "
+            f"~{int(total_tokens)} tokens (~{total_words} words) | "
+            f"k={settings.retrieval_top_k} | "
             f"ctx=2048"
         )
         follow_up_parts.append(diag)

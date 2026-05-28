@@ -347,16 +347,13 @@ class StudyPlugin(Plugin):
             try:
                 async with OllamaGuard("qna generation", timeout=120):
                     llm = get_llm()
-                    from llama_index.core.response_synthesizers import TreeSummarize
-                    synthesizer = TreeSummarize(llm=llm)
 
-                    # Use the prompt as summary template
+                    # Use direct prompt instead of TreeSummarize (avoids formatting interference)
+                    context_text = "\n\n".join(chunk_texts[:5])
+                    full_prompt = f"{prompt}\n\nContext from documents:\n{context_text}"
+
                     response = await asyncio.wait_for(
-                        synthesizer.aget_response(
-                            query_str=topic,
-                            text_chunks=chunk_texts,
-                            summary_template=prompt,
-                        ),
+                        llm.acomplete(full_prompt),
                         timeout=60.0,
                     )
                     answer_text = str(response).strip()
@@ -374,38 +371,27 @@ class StudyPlugin(Plugin):
             if not answer_text or len(answer_text) < 50:
                 return "📭 *I couldn't generate meaningful Q&A pairs for this topic.*\n\nTry a different topic or check that your documents contain relevant material."
 
-            # Parse generated pairs into history
-            new_pairs = []
-            for line in answer_text.split("\n"):
-                line = line.strip()
-                if line.startswith("[") and "Q:" in line:
-                    q = line.split("Q:", 1)[1].strip()
-                    new_pairs.append({"q": q, "a": ""})
-                elif line.startswith("A:") and new_pairs:
-                    new_pairs[-1]["a"] = line.split("A:", 1)[1].strip()
+            # Count generated pairs via pattern matching (handles any format)
+            import re
+            q_markers = len(re.findall(
+                r'(?:^|\n)\s*(?:\[\d+\]|Q\d*[:.]|Question\s*\d*[:.]|^\d+[.])',
+                answer_text, re.IGNORECASE
+            ))
+            estimated = max(q_markers, 1)
 
-            # If parsing failed, store a single entry with full text
-            if not new_pairs:
-                new_pairs.append({"q": topic, "a": answer_text[:200]})
+            # Store raw text instead of parsed pairs
+            new_pairs = [{"q": topic, "a": answer_text}]
 
             # Store in history
             _qna_history[key] = existing + new_pairs
-            total_pairs = len(_qna_history[key])
+            total_pairs = len(existing) + estimated
 
-            # Build display text
-            header = f"📝 *Q&A: {topic}*"
+            # Build display text — show raw model output directly
+            header = f"📝 *Q&A: {topic}* (est. {estimated} pairs)"
             if is_rerun:
-                header += f" (Part {len(existing)//count + 1} — {len(new_pairs)} new)"
-            else:
-                header += f" ({len(new_pairs)} pairs)"
+                header += f" — Part {len(existing)//count + 1}"
 
-            lines = [header, ""]
-            for i, pair in enumerate(new_pairs, start_num):
-                q = pair.get("q", "")
-                a = pair.get("a", "")
-                lines.append(f"[{i}] Q: {q}")
-                lines.append(f"    A: {a}")
-                lines.append("")
+            lines = [header, "", answer_text, ""]
 
             # Footer
             lines.append(f"_Total: {total_pairs} pairs across {total_pairs // count} session(s)_")
@@ -416,7 +402,7 @@ class StudyPlugin(Plugin):
             total_tokens = sum(len(t.split()) * 1.3 for t in chunk_texts)
             follow_up = (
                 f"📊 *Retrieval:* {len(chunk_texts)} chunks | ~{int(total_tokens)} tokens | k=3\n"
-                f"📝 Generated: {len(new_pairs)} pairs in {elapsed:.1f}s"
+                f"📝 Generated: ~{estimated} pairs in {elapsed:.1f}s"
             )
 
             processing = {

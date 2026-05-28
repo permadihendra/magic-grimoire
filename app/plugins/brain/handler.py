@@ -244,12 +244,8 @@ async def _tool_ask(query: str, difficulty: str = "normal", document: str | None
                 "• Run `/index` if you recently added files"
             )
 
-        # Send follow-up (next-steps + diagnostics) as a separate message
-        if follow_up and chat_id:
-            await asyncio.sleep(0.5)
-            await _send_telegram_message(chat_id, follow_up)
-
-        return answer
+        # Return both answer and follow_up — brain handler sends follow_up after all chunks
+        return answer, follow_up
     except Exception as e:
         logger.error("ask() failed: %s", e)
         return f"⚠️ Sorry, I couldn't find an answer.\n\nError: {e}"
@@ -321,17 +317,21 @@ async def _tool_list_docs_v2() -> str:
 
 async def _tool_chat(text: str) -> str:
     """Execute the chat() tool — direct Ollama conversation (no RAG)."""
+    from app.rag.guard import OllamaGuard, OllamaBusyError
     from app.rag.models import get_llm
     try:
-        llm = get_llm()
-        personality = settings.ai_personality.strip()
-        prompt = (
-            f"Personality: {personality}\n\nRespond conversationally to: {text}"
-            if personality
-            else f"Respond conversationally to: {text}"
-        )
-        response = await llm.acomplete(prompt)
-        return str(response).strip()
+        async with OllamaGuard("chat", require_health=False):
+            llm = get_llm()
+            personality = settings.ai_personality.strip()
+            prompt = (
+                f"Personality: {personality}\n\nRespond conversationally to: {text}"
+                if personality
+                else f"Respond conversationally to: {text}"
+            )
+            response = await llm.acomplete(prompt)
+            return str(response).strip()
+    except OllamaBusyError:
+        return "⏳ I'm busy answering another question. Try again in a moment!"
     except Exception as e:
         logger.error("chat() failed: %s", e)
         return "Hey! 😊 I'm here to help you study. Ask me anything about your documents!"
@@ -544,6 +544,7 @@ class BrainPlugin(Plugin):
 
             # Execute tools with error handling
             result_lines = []
+            result_follow_ups = []
             for t_name, t_params in tool_tasks:
                 # Inject chat_id for feedback learning
                 t_params = dict(t_params)
@@ -555,7 +556,13 @@ class BrainPlugin(Plugin):
 
                     try:
                         result = await tool_fn(**t_params)
-                        result_lines.append(result)
+                        # Handle tuple return (answer, follow_up)
+                        if isinstance(result, tuple) and len(result) >= 2:
+                            result_lines.append(result[0])
+                            result_follow_ups.append(result[1])
+                        else:
+                            result_lines.append(result)
+                            result_follow_ups.append(None)
                     except Exception as e:
                         logger.error("Tool '%s' failed: %s", t_name, e, exc_info=True)
                         from app.rag.guard import OllamaBusyError, OllamaDeadError
@@ -591,6 +598,12 @@ class BrainPlugin(Plugin):
                 for chunk in chunks:
                     await asyncio.sleep(0.3)
                     await _send_telegram_message(chat_id, chunk)
+
+            # Send follow-ups (next-step + diagnostics) AFTER all answer chunks
+            for fu in result_follow_ups:
+                if fu:
+                    await asyncio.sleep(0.5)
+                    await _send_telegram_message(chat_id, fu)
 
             _remember(chat_id, message, (final_reply or tool_text))
             return None

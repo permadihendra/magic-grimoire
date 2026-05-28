@@ -60,18 +60,24 @@ async def ollama_is_alive(timeout: float = 2.0) -> bool:
 async def ollama_check_vram() -> tuple[bool, str]:
     """Check if we have enough VRAM for inference. Returns (ok, message)."""
     try:
-        import subprocess
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.used,memory.total",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5,
+        import asyncio
+        proc = await asyncio.create_subprocess_exec(
+            "nvidia-smi", "--query-gpu=memory.used,memory.total",
+            "--format=csv,noheader,nounits",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        if result.returncode == 0:
-            used, total = result.stdout.strip().split(",")
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return True, "VRAM check timed out"
+
+        result = stdout.decode().strip()
+        if result:
+            used, total = result.split(",")
             used_mb = float(used.strip())
             total_mb = float(total.strip())
             free_mb = total_mb - used_mb
-            # We need ~2GB for model + ~0.5GB for KV cache
             if free_mb < 1800:
                 return False, f"Low VRAM: {int(free_mb)}MB free (need ~2300MB)"
             return True, f"VRAM OK: {int(free_mb)}MB free"

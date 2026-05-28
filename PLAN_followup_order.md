@@ -99,34 +99,31 @@ The diagnostics footer currently shows:
 📊 Retrieval: 3 chunks | ~420 tokens | k=3 | ctx=4096
 ```
 
-"Tokens" is meaningless to a non-technical user. Change to **words**:
+Keep all existing debugging info, just **add word counts alongside tokens** for non-technical understanding:
 ```
-📊 Retrieval: 3 passages | ~315 words | generated ~850 words
+📊 Retrieval: 3 chunks | ~420 tokens (~315 words) | k=3 | ctx=4096
 ```
 
 ### Changes
 
 **`app/rag/engine.py`** — Footer construction (line ~517-521):
 ```python
-# OLD (token-focused)
+# OLD (tokens only)
 diag = (
     f"📊 *Retrieval:* {len(chunk_texts)} chunks | "
     f"~{int(total_tokens)} tokens | k={settings.retrieval_top_k} | "
     f"ctx=2048"
 )
 
-# NEW (word-focused)
+# NEW (tokens + words)
 # 1 token ≈ 0.75 words for English
-word_count = len(answer.split()) if answer else 0
 diag = (
-    f"📊 *Retrieval:* {len(chunk_texts)} passages | "
-    f"~{int(total_tokens * 0.75)} source words | "
-    f"generated ~{word_count} words"
+    f"📊 *Retrieval:* {len(chunk_texts)} chunks | "
+    f"~{int(total_tokens)} tokens (~{int(total_tokens * 0.75)} words) | "
+    f"k={settings.retrieval_top_k} | "
+    f"ctx=2048"
 )
 ```
-
-Similarly for the follow-up sent by `_tool_ask` in brain handler — show word count of generated answer.
-
 ---
 
 ## Files Changed
