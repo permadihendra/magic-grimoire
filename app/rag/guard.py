@@ -19,7 +19,8 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 # Module state
-_ollama_sem = asyncio.Semaphore(1)
+_gpu_lock = asyncio.Semaphore(1)   # Global GPU lock — ONE operation at a time
+_ollama_sem = _gpu_lock             # Alias: OllamaGuard uses same lock
 _current_operation: str | None = None
 _current_chat_id: int | None = None
 _last_health: tuple[float, bool] = (0, True)

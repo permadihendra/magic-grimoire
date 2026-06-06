@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 1024
     llm_timeout: float = 30.0
     llm_gateway_url: str = "http://localhost:4000"  # llm-gateway base URL
-    llm_context_window: int = 4096  # Must match Modelfile num_ctx
+    llm_context_window: int = 2048  # Must match Modelfile num_ctx (2048 saves ~1.2GB KV cache)
 
     # ── Ollama (RAG Engine) ───────────────────────────────
     ollama_base_url: str = "http://localhost:11434"
@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     use_query_refiner: bool = True       # Gemini query refinement before retrieval
     use_reranker: bool = True            # Cross-encoder reranking after retrieval
     use_bm25_fallback: bool = True       # BM25 keyword search if rerank fails
-    reranker_top_k: int = 5             # Chunks after reranking
+    reranker_top_k: int = 3             # Chunks after reranking (3 = less VRAM pressure)
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L6-v2"
     reranker_threshold: float = 0.0     # Min rerank score (logits; 0.0 = keep positive)
     reranker_device: str = "cuda"       # "cuda" or "cpu" (fallback on OOM)
