@@ -497,7 +497,7 @@ class RAGEngine:
 
         # --- Phase 2: LLM generation with timeout + fallback ---
         logger.info("[%s]  [p2] LLM START chunks=%d ~%d tokens (headroom=%d)",
-                    _qid, chunk_count, int(total_input_tokens), int(available_for_response))
+                    _qid, chunk_count, int(total_tokens), int(available_for_response))
 
         from app.rag.models import get_llm
         from app.rag.guard import OllamaGuard, OllamaBusyError, OllamaDeadError
