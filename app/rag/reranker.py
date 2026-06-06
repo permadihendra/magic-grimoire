@@ -85,12 +85,9 @@ def rerank_chunks(
         logger.warning("Reranker unavailable — returning original chunks (top %d)", top_k)
         return chunks[:top_k]
 
-    # Acquire global GPU lock — only one GPU operation at a time
-    import asyncio
+    # Check global GPU lock — skip rerank if another operation is running
     from app.rag.guard import _gpu_lock
-    try:
-        _gpu_lock.acquire_nowait()
-    except asyncio.LockedError:
+    if _gpu_lock.locked():
         logger.info("Reranker: GPU busy — skipping rerank, returning original chunks")
         return chunks[:top_k]
 
@@ -130,8 +127,6 @@ def rerank_chunks(
     except Exception as e:
         logger.error("Reranker failed: %s — returning original chunks", e)
         return chunks[:top_k]
-    finally:
-        _gpu_lock.release()
 
 
 def rerank_available() -> bool:
