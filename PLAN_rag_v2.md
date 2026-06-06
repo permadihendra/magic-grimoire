@@ -72,9 +72,9 @@ User Question
 ### 1. Local Cross-Encoder Reranker
 
 **Model:** `BGE-Reranker` or `ms-marco-MiniLM-L6-v2`
-**Runtime:** CPU (falls back to GPU if available)
-**VRAM:** < 500MB — fits easily on RTX 3050 alongside LLM
-**Library:** `sentence-transformers`
+**Runtime:** GPU — loaded via Ollama (`ollama pull BAAI/bge-reranker-base`) or sentence-transformers with `device="cuda"`
+**VRAM:** ~500MB — fits well within RTX 3050 headroom alongside LLM + embed
+**Library:** `sentence-transformers` (GPU-accelerated)
 
 **Behavior:**
 - Input: Query + 20 retrieved chunks
@@ -82,9 +82,35 @@ User Question
 - Filter threshold: Score < 0.3 → discard
 - Output: Top 5 chunks to synthesis
 
+**GPU Loading Strategy (Ollama):**
+1. `ollama pull BAAI/bge-reranker-base`
+2. Load via Ollama rerank API endpoint (`/rerank`)
+3. VRAM managed by Ollama — model stays loaded between queries (fast subsequent calls)
+
+**VRAM Budget (RTX 3050 8GB — all GPU):**
+```
+LLM (magic-grimoire:3b)     1.9 GB
+KV cache (1024 ctx)         ~1.2 GB
+Ollama embed (nomic)        ~0.3 GB
+Cross-encoder (GPU)          ~0.5 GB
+─────────────────────────────────
+Total                        ~3.9 GB
+Headroom                     ~4.1 GB
+```
+
+**Pipeline Timing (GPU-accelerated):**
+- Query refinement (Gemini): ~50ms
+- Embed + retrieve 20 chunks: ~200-400ms (Ollama embed, GPU)
+- Cross-encoder rerank 20→5: ~300-600ms (GPU, Ollama-managed)
+- Synthesis (TreeSummarize): ~2-4s (LLM)
+- **Total estimated: ~3-5s end-to-end**
+
+**Fallback:** If cross-encoder OOMs, fallback to CPU mode (`device="cpu"`) via sentence-transformers — slower but prevents crash. Ollama VRAM guard handles this automatically.
+
 **Implementation Location:** `app/rag/engine.py`
 - Add `RerankerNode` class or integrate into `RAGEngine.query_with_sources()`
-- Add `settings.reranker_threshold` to `config.py`
+- Add `settings.reranker_threshold` and `settings.reranker_ollama_model` to `config.py`
+- Add OllamaGuard check before loading reranker model
 
 ### 2. Query Refiner (Gemini)
 
@@ -218,7 +244,8 @@ chunk_overlap: float = 0.2       # 20% overlap between chunks
 | Metric | Target |
 |---|---|
 | Retrieval precision (correct doc in top-5) | > 80% (was ~20%) |
-| Average query latency | < 5s (reranker adds ~1-2s) |
+| Average query latency | < 5s end-to-end |
+| Cross-encoder GPU VRAM | Stable < 4.5 GB total |
 | Fallback trigger rate | < 10% of queries |
 | Chunks not sentence-split | 100% |
 
