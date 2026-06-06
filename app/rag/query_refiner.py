@@ -52,7 +52,7 @@ async def refine_query(question: str) -> list[str]:
             system_prompt=_REFINER_SYSTEM,
             user_message=question,
             max_tokens=150,
-            timeout=5.0,
+            timeout=20.0,
         )
         elapsed_ms = (time.time() - t0) * 1000
 

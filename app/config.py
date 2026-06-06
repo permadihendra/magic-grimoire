@@ -14,12 +14,13 @@ class Settings(BaseSettings):
     telegram_webhook_secret: str = ""
     allowed_chat_ids: list[int] = []
 
-    # ── Gemini (Agent Brain) ──────────────────────────────
+    # ── Gemini / LLM Gateway (Agent Brain) ───────────────
     gemini_api_key: str = ""
-    llm_provider: str = "gemini"
-    llm_model: str = "gemini-2.5-flash-lite"
+    llm_provider: str = "gateway"       # "gemini" (direct API) or "gateway" (llm-gateway proxy)
+    llm_model: str = "smart-router"     # Model name (gemini-2.5-flash-lite or smart-router)
     llm_max_tokens: int = 1024
     llm_timeout: float = 30.0
+    llm_gateway_url: str = "http://localhost:4000"  # llm-gateway base URL
 
     # ── Ollama (RAG Engine) ───────────────────────────────
     ollama_base_url: str = "http://localhost:11434"
@@ -60,7 +61,7 @@ class Settings(BaseSettings):
     @field_validator("llm_provider")
     @classmethod
     def validate_provider(cls, v: str) -> str:
-        allowed = {"gemini"}
+        allowed = {"gemini", "gateway"}
         if v not in allowed:
             raise ValueError(f"llm_provider must be one of: {allowed}")
         return v
