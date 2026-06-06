@@ -448,9 +448,35 @@ class RAGEngine:
                 "processing": {"backend": _backend(), "chunks": 0, "cache_hit": False, "elapsed_ms": (time.time()-_t0)*1000},
             }
 
-        # --- GUARDRAIL: Validate chunks before LLM call ---
-        chunk_texts = [n.text for n in nodes if n.text] if nodes else chunk_texts_for_rerank
+        # --- GUARDRAIL: Token-aware chunk selection ---
+        # Select chunks that fit within the context window budget
+        # Never exceed ctx - system_prompt - query = available tokens for chunks
+        ctx_window = settings.llm_context_window
+        SYSTEM_PROMPT_TOKENS = 250   # TreeSummarize system + user prompt
+        QUERY_TOKENS = 50            # User query + template overhead
+        chunk_budget = ctx_window - SYSTEM_PROMPT_TOKENS - QUERY_TOKENS  # ~1748 for 2048 ctx
+
+        raw_texts = [n.text for n in nodes if n.text] if nodes else chunk_texts_for_rerank
+
+        # Token-aware selection: pick chunks until budget is full
+        chunk_texts = []
+        total_tokens = 0
+        for text in raw_texts:
+            chunk_tokens = int(len(text.split()) * 1.3)
+            if total_tokens + chunk_tokens > chunk_budget:
+                logger.info(
+                    "[%s] Token budget: stopping at %d chunks (%d/%d tokens)",
+                    _qid, len(chunk_texts), total_tokens, chunk_budget,
+                )
+                break
+            chunk_texts.append(text)
+            total_tokens += chunk_tokens
+
         chunk_count = len(chunk_texts)
+        logger.info(
+            "[%s] Token-aware selection: %d chunks, ~%d/%d tokens",
+            _qid, chunk_count, total_tokens, chunk_budget,
+        )
 
         if chunk_count == 0:
             logger.warning("[%s] No chunks retrieved — skipping LLM call", _qid)
@@ -464,21 +490,10 @@ class RAGEngine:
                 "processing": {"backend": _backend(), "chunks": 0, "cache_hit": False, "elapsed_ms": (time.time()-_t0)*1000},
             }
 
-        # Token budget check
-        total_input_tokens = sum(len(t.split()) * 1.3 for t in chunk_texts)
-        system_prompt_tokens = 250
-        ctx_window = settings.llm_context_window
-        available_for_response = ctx_window - total_input_tokens - system_prompt_tokens
-        if total_input_tokens > ctx_window * 0.8:
-            logger.warning("[%s] Token budget high: ~%d input + %d system > %d ctx",
-                          _qid, int(total_input_tokens), system_prompt_tokens, ctx_window)
+        # Safety check: verify we didn't overshoot (should never happen with token-aware selection)
+        available_for_response = ctx_window - total_tokens - SYSTEM_PROMPT_TOKENS
         if available_for_response < 50:
-            logger.error("[%s] Insufficient context headroom: %d tokens", _qid, int(available_for_response))
-            return {
-                "answer": "⚠️ *Context window too full.* Try a more specific question.",
-                "sources": sources,
-                "processing": {"backend": _backend(), "chunks": chunk_count, "cache_hit": False, "elapsed_ms": (time.time()-_t0)*1000},
-            }
+            logger.error("[%s] Safety: headroom=%d after selection — this should not happen", _qid, int(available_for_response))
 
         # --- Phase 2: LLM generation with timeout + fallback ---
         logger.info("[%s]  [p2] LLM START chunks=%d ~%d tokens (headroom=%d)",
@@ -614,10 +629,8 @@ class RAGEngine:
             "or a `summary` of the key points? Just ask!"
         )
 
-        # Diagnostics footer: chunk count + token size
-        chunk_texts = [n.text for n in nodes if n.text]
-        total_tokens = sum(len(t.split()) * 1.3 for t in chunk_texts)
-        total_words = int(total_tokens * 0.75)  # ~0.75 words per token
+        # Diagnostics footer: use the token count from selection phase
+        total_words = int(total_tokens * 0.75)
         refine_info = f" | refine={len(queries)}" if len(queries) > 1 else ""
         rerank_info = " | reranked" if settings.use_reranker else ""
         diag = (
