@@ -229,7 +229,8 @@ async def dispatch(update, thinking_msg_id: int | None = None) -> DispatchResult
                 return DispatchResult(reply=result)
             except Exception as e:
                 logger.error("Plugin '%s' failed: %s", plugin.name, e, exc_info=True)
-                return DispatchResult(reply=f"⚠️ Error processing `/{command}`.")
+                error_detail = str(e)[:200]
+                return DispatchResult(reply=f"⚠️ Error processing `/{command}`:\n`{error_detail}`")
         return DispatchResult(reply=None)
 
     # ── 5. Free text → BrainPlugin (Gemini agent) ───────
