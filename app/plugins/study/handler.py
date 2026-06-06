@@ -32,6 +32,77 @@ _rag_engine: RAGEngine | None = None
 _doc_indexer: DocumentIndexer | None = None
 
 
+# ── Parse error → fix suggestion mapping ─────────────────
+
+def _parse_error_hint(error: str, fname: str) -> str:
+    """Map a parser error string to a specific, actionable fix suggestion."""
+    ext = os.path.splitext(fname)[1].lower()
+    error_lower = error.lower()
+
+    # EPUB-specific
+    if "ebooklib" in error_lower:
+        return "Run `uv sync --extra epub` to install EPUB support"
+    if "html2text" in error_lower:
+        return "Run `uv sync --extra epub` to install html2text"
+
+    # PDF-specific
+    if "liteparse" in error_lower:
+        return "Run `uv sync --extra liteparse` for better PDF parsing"
+
+    # Calibre-specific
+    if "calibre" in error_lower:
+        return "Install Calibre: `sudo apt install calibre` — or convert EPUB to PDF"
+
+    # Generic
+    if "empty text" in error_lower or "empty output" in error_lower:
+        if ext == ".epub":
+            return "EPUB may be DRM-protected or corrupted — try converting to PDF"
+        return "File may be corrupted or password-protected"
+
+    if "timeout" in error_lower:
+        return "File too large or complex — try splitting into smaller files"
+
+    if "no file bytes" in error_lower:
+        return "File may be empty or unreadable"
+
+    # Fallback: suggest format conversion
+    if ext in (".epub", ".mobi", ".azw"):
+        return "Try converting to PDF first, or run `uv sync --extra epub`"
+    return "Check that the file is not corrupted or password-protected"
+
+
+def _build_parse_suggestions(failed_files: list[tuple[str, str]]) -> str:
+    """Build a suggestions block for failed parse files.
+
+    Args:
+        failed_files: List of (filename, error) tuples.
+    """
+    if not failed_files:
+        return ""
+
+    # Collect unique suggestions
+    suggestions = []
+    seen = set()
+    for fname, error in failed_files:
+        hint = _parse_error_hint(error, fname)
+        if hint not in seen:
+            seen.add(hint)
+            suggestions.append(f"  • {hint}")
+
+    # Group by file
+    file_lines = []
+    for fname, error in failed_files:
+        ext = os.path.splitext(fname)[1].lower()
+        file_lines.append(f"  ❌ `{fname}` — {error}")
+
+    lines = ["\n*Failed files:*"] + file_lines
+    if suggestions:
+        lines.append("\n*Fixes (try in order):*")
+        lines.extend(suggestions)
+
+    return "\n".join(lines)
+
+
 class StudyPlugin(Plugin):
     name = "study"
     commands = ["ask", "quiz", "docs", "index", "files", "delete", "summarize", "qna"]
@@ -449,9 +520,11 @@ class StudyPlugin(Plugin):
                     f"   └─ {result.method} ✅ — {result.word_count:,} words\n"
                 )
             else:
+                hint = _parse_error_hint(result.error or "parsing failed", fname)
                 pre_lines.append(
                     f"📄 [{i}/{len(files)}] `{fname}` ({size_mb:.1f} MB)\n"
                     f"   └─ ❌ {result.error or 'parsing failed'}\n"
+                    f"   └─ 💡 {hint}\n"
                 )
 
         pre_text = "\n".join(pre_lines)
@@ -459,14 +532,19 @@ class StudyPlugin(Plugin):
         # Block if ALL files failed parsing
         if success_count == 0:
             logger.error("All %d files failed pre-index check", len(files))
+
+            # Collect per-file errors for specific suggestions
+            failed_files = []
+            for fname in files:
+                fpath = os.path.join(docs_dir, fname)
+                result = await _doc_indexer.pre_index_check_single(fpath, fname)
+                if not result.success:
+                    failed_files.append((fname, result.error or "unknown"))
+
+            suggestions = _build_parse_suggestions(failed_files)
             block_msg = (
-                "❌ *No documents could be parsed.*\n\n"
-                "All files failed during pre-index check.\n\n"
-                "Suggestions:\n"
-                "1. `uv sync --extra epub` — install EPUB support\n"
-                "2. `uv sync --extra liteparse` — install PDF/OCR support\n"
-                "3. Convert EPUB to PDF and re-upload\n"
-                "4. Try a plain .txt file\n\n"
+                f"❌ *No documents could be parsed.*\n\n"
+                f"{suggestions}\n\n"
                 "⚠️ Your old index is preserved. Bot is still functional."
             )
             if msg_id:
@@ -531,7 +609,9 @@ class StudyPlugin(Plugin):
                     f"📄 `{fname}` — ✅ {result.word_count:,} words | {file_chunks} chunks"
                 )
             elif error:
+                hint = _parse_error_hint(error[1], fname)
                 file_lines.append(f"📄 `{fname}` — ❌ {error[1][:60]}")
+                file_lines.append(f"   💡 {hint}")
             else:
                 file_lines.append(f"📄 `{fname}` — ❌ unknown error")
 
@@ -545,7 +625,7 @@ class StudyPlugin(Plugin):
         )
 
         if failed > 0:
-            result_text += f"\n⚠️ {failed} file(s) could not be parsed.\n"
+            result_text += f"\n⚠️ {failed} file(s) could not be parsed."
 
         if chunks == 0:
             result_text += ("\n❌ *WARNING: 0 chunks indexed.*\n"
