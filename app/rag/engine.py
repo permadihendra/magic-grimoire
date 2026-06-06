@@ -467,10 +467,11 @@ class RAGEngine:
         # Token budget check
         total_input_tokens = sum(len(t.split()) * 1.3 for t in chunk_texts)
         system_prompt_tokens = 250
-        available_for_response = 2048 - total_input_tokens - system_prompt_tokens
-        if total_input_tokens > 1800:
-            logger.warning("[%s] Token budget high: ~%d input + %d system > 2048 ctx",
-                          _qid, int(total_input_tokens), system_prompt_tokens)
+        ctx_window = settings.llm_context_window
+        available_for_response = ctx_window - total_input_tokens - system_prompt_tokens
+        if total_input_tokens > ctx_window * 0.8:
+            logger.warning("[%s] Token budget high: ~%d input + %d system > %d ctx",
+                          _qid, int(total_input_tokens), system_prompt_tokens, ctx_window)
         if available_for_response < 50:
             logger.error("[%s] Insufficient context headroom: %d tokens", _qid, int(available_for_response))
             return {
@@ -623,7 +624,7 @@ class RAGEngine:
             f"📊 *Retrieval:* {len(chunk_texts)} chunks | "
             f"~{int(total_tokens)} tokens (~{total_words} words) | "
             f"k={settings.retrieval_top_k}{refine_info}{rerank_info} | "
-            f"ctx=4096"
+            f"ctx={settings.llm_context_window}"
         )
         follow_up_parts.append(diag)
 

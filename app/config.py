@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 1024
     llm_timeout: float = 30.0
     llm_gateway_url: str = "http://localhost:4000"  # llm-gateway base URL
+    llm_context_window: int = 4096  # Must match Modelfile num_ctx
 
     # ── Ollama (RAG Engine) ───────────────────────────────
     ollama_base_url: str = "http://localhost:11434"
