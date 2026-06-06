@@ -109,16 +109,15 @@ Low risk — `acquire()` is atomic, worst case is a slightly delayed "busy" mess
 
 ## Future Improvements
 
-### 🔴 RAG v2 — Retrieval Quality Overhaul (highest impact) → **APPROVED, detailed plan below**
-Current ~80% retrieval failure rate. Three new pipeline stages:
+### ✅ RAG v2 — Retrieval Quality Overhaul (highest impact)
+Three new pipeline stages added to `query_with_sources()`:
 
 1. **Query Refiner (Gemini)** — strip filler, expand keywords (~50ms)
 2. **Over-Retrieve + Cross-Encoder Reranker** — top 20 → rerank → top 5 (~0.5GB VRAM)
 3. **BM25 Fallback** — keyword search when rerank returns empty
 
-**Detailed plan:** `PLAN_rag_v2.md`
-**Target:** >80% retrieval precision, <6s latency, zero crashes
-**Feature flags:** `use_query_refiner`, `use_reranker`, `use_bm25_fallback` — all in `config.py`
+**Files:** `app/rag/reranker.py`, `app/rag/query_refiner.py`, `app/rag/bm25_fallback.py`
+**Config:** `use_query_refiner`, `use_reranker`, `use_bm25_fallback` — all in `config.py`
 **Rollback:** Set all three to `False` to revert to old pipeline
 
 ### 🟡 Streaming Output (high priority)
