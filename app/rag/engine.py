@@ -23,6 +23,9 @@ from app.rag.prompts import (
     get_quiz_prompt,
     SUMMARY_PROMPT,
 )
+from app.rag.query_refiner import refine_query
+from app.rag.reranker import rerank_chunks
+from app.rag.bm25_fallback import bm25_search
 
 logger = logging.getLogger(__name__)
 
@@ -107,16 +110,18 @@ class RAGEngine:
         self._index = index
         self._retriever = None
 
-    def _get_retriever(self) -> VectorIndexRetriever:
-        if self._retriever is not None:
-            return self._retriever
+    def _get_retriever(self, top_k: int | None = None) -> VectorIndexRetriever:
+        """Get retriever with optional top_k override.
+
+        Does not cache — recreating is cheap and avoids stale top_k.
+        """
         if self._index is None:
             raise RuntimeError("No index available")
-        self._retriever = VectorIndexRetriever(
+        k = top_k or settings.retrieval_top_k
+        return VectorIndexRetriever(
             index=self._index,
-            similarity_top_k=settings.retrieval_top_k,
+            similarity_top_k=k,
         )
-        return self._retriever
 
     # ── Retrieve only (no LLM generation) ─────────────────
 
@@ -131,7 +136,7 @@ class RAGEngine:
         Returns:
             List of dicts with keys: text, filename, score.
         """
-        retriever = self._get_retriever()
+        retriever = self._get_retriever(top_k=settings.retrieval_top_k)  # over-retrieve (20)
         nodes = retriever.retrieve(question)
 
         # Apply document boosting
@@ -162,10 +167,21 @@ class RAGEngine:
                 doc_nodes.sort(key=lambda n: n.score or 0, reverse=True)
                 other_nodes.sort(key=lambda n: n.score or 0, reverse=True)
                 forced_count = min(2, len(doc_nodes))
-                remaining = max(0, 5 - forced_count)
+                remaining = max(0, settings.reranker_top_k - forced_count)
                 nodes = doc_nodes[:forced_count] + other_nodes[:remaining]
         else:
             nodes.sort(key=lambda n: n.score or 0, reverse=True)
+
+        # Optional reranking for retrieve_only
+        if settings.use_reranker and len(nodes) > settings.reranker_top_k:
+            rerank_input = [
+                {"text": n.text or "", "filename": n.metadata.get("file_name", ""),
+                 "score": float(n.score) if n.score else 0.0, "_node": n}
+                for n in nodes
+            ]
+            reranked = rerank_chunks(question, rerank_input, top_k=settings.reranker_top_k)
+            if reranked:
+                nodes = [r["_node"] for r in reranked if "_node" in r]
 
         passages = []
         seen_files = set()
@@ -274,9 +290,29 @@ class RAGEngine:
         # Cache was removed because repeated questions returned identical answers.
         # Telegram already stores conversation history.
 
-        # --- Phase 1: Sync retrieval with document boosting + feedback ---
-        retriever = self._get_retriever()
-        nodes = retriever.retrieve(question)
+        # --- Phase 0.5: Query Refinement (Gemini) ---
+        queries = await refine_query(question)
+        logger.info("[%s]  [p0.5] Refined to %d queries", _qid, len(queries))
+
+        # --- Phase 1: Over-Retrieve with multi-query + merge ---
+        all_nodes = []
+        seen_node_ids = set()
+
+        retriever = self._get_retriever(top_k=settings.retrieval_top_k)  # 20
+
+        for q in queries:
+            q_nodes = retriever.retrieve(q)
+            for node in q_nodes:
+                nid = getattr(node, "node_id", node.text[:100])
+                if nid not in seen_node_ids:
+                    seen_node_ids.add(nid)
+                    all_nodes.append(node)
+
+        nodes = all_nodes
+        logger.info(
+            "[%s]  [p1] Retrieved %d unique chunks from %d queries",
+            _qid, len(nodes), len(queries),
+        )
 
         # Load feedback learner for this chat (if available)
         learner = None
@@ -320,7 +356,7 @@ class RAGEngine:
         else:
             nodes.sort(key=lambda n: n.score or 0, reverse=True)
 
-        # Extract unique sources
+        # Extract unique sources (baseline, may be overwritten by reranker)
         seen_files = set()
         sources = []
         for node in nodes:
@@ -331,6 +367,69 @@ class RAGEngine:
                     "filename": fname,
                     "score": float(node.score) if node.score else 0.0,
                 })
+
+        # --- Phase 1.5: Cross-Encoder Reranking ---
+        chunk_texts_for_rerank = [n.text for n in nodes if n.text]
+        if settings.use_reranker and len(nodes) > settings.reranker_top_k:
+            rerank_input = [
+                {"text": n.text or "", "filename": n.metadata.get("file_name", "Unknown"),
+                 "score": float(n.score) if n.score else 0.0, "_node": n}
+                for n in nodes
+            ]
+            reranked = rerank_chunks(question, rerank_input, top_k=settings.reranker_top_k)
+            if reranked:
+                nodes = [r["_node"] for r in reranked if "_node" in r]
+                # Rebuild sources from reranked results
+                sources = []
+                seen_files = set()
+                for r in reranked:
+                    fname = r.get("filename", "Unknown")
+                    if fname not in seen_files and len(sources) < _MAX_SOURCES:
+                        seen_files.add(fname)
+                        sources.append({
+                            "filename": fname,
+                            "score": r.get("rerank_score", r.get("score", 0.0)),
+                        })
+                logger.info(
+                    "[%s]  [p1.5] Reranked: %d -> %d chunks",
+                    _qid, len(rerank_input), len(nodes),
+                )
+            else:
+                logger.warning("[%s]  [p1.5] Reranker returned empty", _qid)
+
+        # --- Phase 1.7: BM25 Fallback (if rerank returned too few) ---
+        if settings.use_bm25_fallback and len(nodes) < 2:
+            logger.info("[%s]  [p1.7] Trying BM25 fallback", _qid)
+            try:
+                all_index_nodes = []
+                for _doc_id, doc_node in self._index.docstore.docs.items():
+                    all_index_nodes.append({
+                        "text": doc_node.text or "",
+                        "filename": doc_node.metadata.get("file_name", "Unknown"),
+                        "score": 0.0,
+                    })
+                bm25_results = bm25_search(question, all_index_nodes, top_k=settings.reranker_top_k)
+                if bm25_results:
+                    # Use BM25 results as chunk_texts directly
+                    chunk_texts_for_rerank = [r["text"] for r in bm25_results if r.get("text")]
+                    # Rebuild sources from BM25
+                    sources = []
+                    seen_files = set()
+                    for r in bm25_results:
+                        fname = r.get("filename", "Unknown")
+                        if fname not in seen_files and len(sources) < _MAX_SOURCES:
+                            seen_files.add(fname)
+                            sources.append({
+                                "filename": fname,
+                                "score": r.get("bm25_score", 0.0),
+                            })
+                    logger.info(
+                        "[%s]  [p1.7] BM25 found %d chunks", _qid, len(bm25_results),
+                    )
+                else:
+                    logger.info("[%s]  [p1.7] BM25 found nothing", _qid)
+            except Exception as e:
+                logger.warning("[%s]  [p1.7] BM25 fallback failed: %s", _qid, e)
 
         # --- Validate: no source nodes found ---
         if not sources:
@@ -350,7 +449,7 @@ class RAGEngine:
             }
 
         # --- GUARDRAIL: Validate chunks before LLM call ---
-        chunk_texts = [n.text for n in nodes if n.text]
+        chunk_texts = [n.text for n in nodes if n.text] if nodes else chunk_texts_for_rerank
         chunk_count = len(chunk_texts)
 
         if chunk_count == 0:
@@ -518,11 +617,13 @@ class RAGEngine:
         chunk_texts = [n.text for n in nodes if n.text]
         total_tokens = sum(len(t.split()) * 1.3 for t in chunk_texts)
         total_words = int(total_tokens * 0.75)  # ~0.75 words per token
+        refine_info = f" | refine={len(queries)}" if len(queries) > 1 else ""
+        rerank_info = " | reranked" if settings.use_reranker else ""
         diag = (
             f"📊 *Retrieval:* {len(chunk_texts)} chunks | "
             f"~{int(total_tokens)} tokens (~{total_words} words) | "
-            f"k={settings.retrieval_top_k} | "
-            f"ctx=2048"
+            f"k={settings.retrieval_top_k}{refine_info}{rerank_info} | "
+            f"ctx=4096"
         )
         follow_up_parts.append(diag)
 

@@ -20,6 +20,7 @@ dependencies = [
     "torch>=2.2",
     "liteparse>=2.0.0",
     "poppler-utils>=0.1.0",
+    "rank-bm25>=0.2",
 ]
 
 [project.optional-dependencies]

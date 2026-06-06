@@ -31,7 +31,16 @@ class Settings(BaseSettings):
     docs_dir: str = "app/docs"
     chunk_size: int = 256
     chunk_overlap: int = 30
-    retrieval_top_k: int = 3
+    retrieval_top_k: int = 20        # Over-retrieve for reranker (was 3)
+
+    # ── RAG v2: Query Refinement + Reranking ──────────────
+    use_query_refiner: bool = True       # Gemini query refinement before retrieval
+    use_reranker: bool = True            # Cross-encoder reranking after retrieval
+    use_bm25_fallback: bool = True       # BM25 keyword search if rerank fails
+    reranker_top_k: int = 5             # Chunks after reranking
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L6-v2"
+    reranker_threshold: float = 0.0     # Min rerank score (logits; 0.0 = keep positive)
+    reranker_device: str = "cuda"       # "cuda" or "cpu" (fallback on OOM)
 
     # ── Database ──────────────────────────────────────────
     db_path: str = "data/magic-grimoire.db"
