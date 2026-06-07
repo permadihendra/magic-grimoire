@@ -898,11 +898,11 @@ async def generate_quiz(topic: str, count: int = 5, difficulty: str = "normal", 
         enhanced_topic = f"Generate {count} practice questions about: {topic}"
 
         # Retrieve passages first (for source metadata + token budget)
-        passages = _rag_engine.retrieve_only(enhanced_topic)
+        passages = _rag_engine.retrieve_only(enhanced_topic, document=document)
         chunk_count = len(passages)
         total_tokens = sum(len(p["text"].split()) * 1.3 for p in passages) if passages else 0
         
-        result = await _rag_engine.query(enhanced_topic, mode="quiz", difficulty=difficulty, count=count)
+        result = await _rag_engine.query(enhanced_topic, mode="quiz", difficulty=difficulty, count=count, document=document)
 
         # Append source metadata + next-step (same pattern as /ask answers)
         if passages:
@@ -987,13 +987,14 @@ async def summarize_topic(topic: str, chat_id: int | None = None) -> str:
         return f"⚠️ Summary failed: {e}"
 
 
-async def generate_qna(topic: str, count: int = 10, chat_id: int | None = None) -> str:
+async def generate_qna(topic: str, count: int = 10, chat_id: int | None = None, document: str | None = None) -> str:
     """Generate comprehension Q&A pairs on a topic.
 
     Args:
         topic: Subject for Q&A pairs.
         count: Number of pairs (3-20).
         chat_id: Telegram chat ID for feedback learning.
+        document: Optional document name to focus on.
 
     Used by BrainPlugin's qna() tool.
     """
@@ -1016,13 +1017,19 @@ async def generate_qna(topic: str, count: int = 10, chat_id: int | None = None) 
         logger.info("generate_qna: %s (count=%d)", topic[:80], count)
         enhanced = f"Generate {count} Q&A pairs about: {topic}"
 
+        # Detect Q&A mode from topic (trivia vs comprehension)
+        from app.rag.prompts import detect_qna_mode
+        qna_mode = detect_qna_mode(topic)
+        logger.info("generate_qna: mode=%s for query='%s'", qna_mode, topic[:50])
+
         # Retrieve passages first (for source metadata)
-        passages = _rag_engine.retrieve_only(enhanced)
+        passages = _rag_engine.retrieve_only(enhanced, document=document)
         chunk_count = len(passages)
 
         # Use engine's query_with_sources(mode="qna") — TreeSummarize flow
         result = await _rag_engine.query_with_sources(
             enhanced, mode="qna", count=count, chat_id=chat_id,
+            document=document, qna_mode=qna_mode,
         )
         answer_text = result.get("answer", "") if isinstance(result, dict) else str(result)
 

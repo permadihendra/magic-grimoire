@@ -204,10 +204,27 @@ class RAGEngine:
         mode: str = "qa",
         difficulty: str = "normal",
         count: int = 5,
+        document: str | None = None,
     ) -> str:
         """Query the index and return the answer."""
         retriever = self._get_retriever()
         nodes = retriever.retrieve(question)
+
+        # Apply document filtering (same as retrieve_only)
+        if document:
+            doc_nodes = []
+            other_nodes = []
+            for node in nodes:
+                if _filename_match(node.metadata.get("file_name", ""), document):
+                    node.score = (node.score or 0) * 2.0
+                    doc_nodes.append(node)
+                else:
+                    other_nodes.append(node)
+            if doc_nodes:
+                doc_nodes.sort(key=lambda n: n.score or 0, reverse=True)
+                other_nodes.sort(key=lambda n: n.score or 0, reverse=True)
+                nodes = doc_nodes + other_nodes[:max(0, 5 - len(doc_nodes))]
+
         chunk_texts = [n.text for n in nodes if n.text]
         total_tokens = sum(len(t.split()) * 1.3 for t in chunk_texts)
         logger.info("Retrieval(query): %d chunks, ~%d tokens", len(chunk_texts), int(total_tokens))
@@ -251,6 +268,7 @@ class RAGEngine:
         mode: str = "qa",  # "qa" | "quiz" | "summary" | "qna"
         count: int = 10,
         existing_pairs: list[dict] | None = None,
+        qna_mode: str = "trivia",  # "trivia" | "comprehension"
     ) -> dict[str, Any]:
         """Query and return BOTH answer and source citations.
 
@@ -515,7 +533,7 @@ class RAGEngine:
             from app.rag.prompts import get_qna_prompt
             from llama_index.core.prompts import PromptTemplate
             prompt_template = PromptTemplate(
-                get_qna_prompt(count=count, existing_pairs=existing_pairs)
+                get_qna_prompt(count=count, existing_pairs=existing_pairs, mode=qna_mode)
             )
             prompt_var = "query_str"
         else:  # qa

@@ -157,8 +157,89 @@ Format:
 """
 
 
-def get_qna_prompt(count: int = 10, existing_pairs: list[dict] | None = None) -> str:
-    """Build the Q&A prompt with optional existing pairs context."""
+QNA_PROMPT_TRIVIA = """You are a study tutor. Based on the provided context from the user's study documents, generate {count} trivia Q&A pairs for review.
+
+{existing_block}
+
+{personality}
+
+Context from the user's documents:
+{{context_str}}
+
+Guidelines:
+- Each pair: Q: [question] then A: [answer] on the next line
+- Questions test RECALL: definitions, key terms, facts, examples
+- Answers are concise (1-2 sentences) based ONLY on the provided context
+- Cover different aspects: what is X, name the Y, list the Z
+- Number each pair as [1], [2], etc.
+
+Format:
+[1] Q: [What is/What are/Name/List question]
+    A: [Concise answer from context]
+
+[2] Q: [Another recall question]
+    A: [Answer]
+
+- Vary your questions between sessions. Don't repeat the same Q&A pairs.
+"""
+
+
+QNA_PROMPT_COMPREHENSION = """You are an exam preparation tutor. Based on the provided context from the user's study documents, generate {count} comprehension Q&A pairs for deep understanding.
+
+{existing_block}
+
+{personality}
+
+Context from the user's documents:
+{{context_str}}
+
+Guidelines:
+- Each pair: Q: [question] then A: [answer] on the next line
+- Questions test DEEP understanding: why, how, compare, analyze, apply
+- Answers are complete (2-4 sentences) based ONLY on the provided context
+- Cover different aspects: relationships, significance, application, implications
+- Number each pair as [1], [2], etc.
+
+Format:
+[1] Q: [Why/How/Compare/Analyze question]
+    A: [Complete answer with reasoning from context]
+
+[2] Q: [Another deep question]
+    A: [Answer with analysis]
+
+- Vary your questions between sessions. Don't repeat the same Q&A pairs.
+"""
+
+
+# ── Adaptive Q&A mode detection ──────────────────────────
+
+def detect_qna_mode(query: str) -> str:
+    """Detect whether user wants trivia or comprehension Q&A.
+
+    Returns 'comprehension' if user explicitly asks for deep understanding,
+    otherwise returns 'trivia' (default).
+    """
+    comprehension_keywords = [
+        "deeply", "deep", "understanding", "understand",
+        "analyze", "analisis", "comprehension", "pemahaman",
+        "why", "how does", "explain", "apply", "untuk ujian",
+        "exam", "ujian", "bandingkan", "compare",
+        "what does it mean", "apa artinya", "mengapa",
+    ]
+    query_lower = query.lower()
+    if any(kw in query_lower for kw in comprehension_keywords):
+        return "comprehension"
+    return "trivia"
+
+
+def get_qna_prompt(count: int = 10, existing_pairs: list[dict] | None = None, mode: str = "trivia") -> str:
+    """Build the Q&A prompt with adaptive mode.
+
+    Args:
+        count: Number of Q&A pairs.
+        existing_pairs: Previous pairs to avoid repetition.
+        mode: 'trivia' (definitions, facts) or 'comprehension' (why, how, analyze).
+    """
     personality = settings.ai_personality.strip()
     p = f"Tone: {personality}" if personality else ""
 
@@ -173,7 +254,10 @@ def get_qna_prompt(count: int = 10, existing_pairs: list[dict] | None = None) ->
     else:
         existing_block = f"Generate {count} questions covering the key concepts."
 
-    return QNA_PROMPT.format(count=count, personality=p, existing_block=existing_block)
+    if mode == "comprehension":
+        return QNA_PROMPT_COMPREHENSION.format(count=count, personality=p, existing_block=existing_block)
+    else:
+        return QNA_PROMPT_TRIVIA.format(count=count, personality=p, existing_block=existing_block)
 
 
 # ── Legacy compat ────────────────────────────────────────

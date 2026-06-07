@@ -26,13 +26,16 @@ class QuizRequest(BaseModel):
     topic: str
     count: int = 5
     difficulty: str = "normal"
+    document: str | None = None
 
 class SummarizeRequest(BaseModel):
     topic: str
+    document: str | None = None
 
 class QnaRequest(BaseModel):
     topic: str
     count: int = 10
+    document: str | None = None
 
 class RetrieveRequest(BaseModel):
     query: str
@@ -45,6 +48,7 @@ class FeedbackRequest(BaseModel):
 class ToolResponse(BaseModel):
     result: str
     status: str = "ok"
+    context: str | None = None  # For follow-up queries
 
 
 # ── Health ─────────────────────────────────────────────────
@@ -104,8 +108,9 @@ async def api_quiz(req: QuizRequest):
             count=str(req.count),
             difficulty=req.difficulty,
             chat_id=0,
+            document=req.document,
         )
-        return ToolResponse(result=str(result))
+        return ToolResponse(result=str(result), context=req.topic)
     except Exception as e:
         logger.error("API quiz failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -119,8 +124,9 @@ async def api_summarize(req: SummarizeRequest):
         result = await _tool_summarize(
             topic=req.topic,
             chat_id=0,
+            document=req.document,
         )
-        return ToolResponse(result=str(result))
+        return ToolResponse(result=str(result), context=req.topic)
     except Exception as e:
         logger.error("API summarize failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -135,8 +141,9 @@ async def api_qna(req: QnaRequest):
             topic=req.topic,
             count=str(req.count),
             chat_id=0,
+            document=req.document,
         )
-        return ToolResponse(result=str(result))
+        return ToolResponse(result=str(result), context=req.topic)
     except Exception as e:
         logger.error("API qna failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))

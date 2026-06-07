@@ -291,7 +291,7 @@ async def _tool_ask(query: str, difficulty: str = "normal", document: str | None
         return f"⚠️ Sorry, I couldn't find an answer.\n\nError: {e}"
 
 
-async def _tool_quiz(topic: str, count: str = "5", difficulty: str = "normal", chat_id: int | None = None) -> str:
+async def _tool_quiz(topic: str, count: str = "5", difficulty: str = "normal", chat_id: int | None = None, document: str | None = None) -> str:
     """Execute the quiz() tool — generate practice questions."""
     from app.plugins.study.handler import generate_quiz
     try:
@@ -299,23 +299,23 @@ async def _tool_quiz(topic: str, count: str = "5", difficulty: str = "normal", c
     except (ValueError, TypeError):
         n = 5
     try:
-        return await generate_quiz(topic, n, difficulty=difficulty, chat_id=chat_id)
+        return await generate_quiz(topic, n, difficulty=difficulty, chat_id=chat_id, document=document)
     except Exception as e:
         logger.error("quiz() failed: %s", e)
         return f"⚠️ Sorry, quiz generation failed: {e}"
 
 
-async def _tool_summarize(topic: str, chat_id: int | None = None) -> str:
+async def _tool_summarize(topic: str, chat_id: int | None = None, document: str | None = None) -> str:
     """Execute the summarize() tool — topic summary."""
     from app.plugins.study.handler import summarize_topic
     try:
-        return await summarize_topic(topic, chat_id=chat_id)
+        return await summarize_topic(topic, chat_id=chat_id, document=document)
     except Exception as e:
         logger.error("summarize() failed: %s", e)
         return f"⚠️ Sorry, summary failed: {e}"
 
 
-async def _tool_qna(topic: str, count: str = "10", chat_id: int | None = None) -> str:
+async def _tool_qna(topic: str, count: str = "10", chat_id: int | None = None, document: str | None = None) -> str:
     """Execute the qna() tool — generate comprehension Q&A pairs."""
     from app.plugins.study.handler import generate_qna
     try:
@@ -323,7 +323,7 @@ async def _tool_qna(topic: str, count: str = "10", chat_id: int | None = None) -
     except (ValueError, TypeError):
         n = 10
     try:
-        return await generate_qna(topic, n, chat_id=chat_id)
+        return await generate_qna(topic, n, chat_id=chat_id, document=document)
     except Exception as e:
         logger.error("qna() failed: %s", e)
         return f"⚠️ Sorry, Q&A generation failed: {e}"
