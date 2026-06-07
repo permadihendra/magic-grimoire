@@ -72,18 +72,97 @@ async def query(self, question: str, document: str = None):
 1. First pass: retrieve top 20 candidates
 2. Second pass: filter out glossary/definition chunks, re-rank remaining
 
-### Fix 3: Improve Q&A Prompt for Comprehension
+### Fix 3: Adaptive Q&A Mode (Context-Aware)
 
-Current prompt asks for "DEEP understanding" but doesn't explicitly exclude:
-- Historical/trivia questions
-- Questions about the book's structure
-- Questions about commentators
+**Don't force comprehension mode.** Let user intent decide.
 
-**Add to QNA_PROMPT:**
+**Approach: Detect mode from query keywords**
+
+| User says | Mode | What it generates |
+|-----------|------|-------------------|
+| "quiz me on Bab 3" | trivia | Definitions, facts, recall questions |
+| "quiz me deeply on Bab 3" | comprehension | Analysis, why, how, apply |
+| "test my understanding" | comprehension | Deep questions |
+| "soal tentang Bab 3" | trivia | Standard quiz |
+| "buatkan quiz untuk ujian" | comprehension | Exam-style deep questions |
+
+**Keyword triggers for comprehension mode:**
 ```
-- DO NOT ask about: chapter numbering, verse counts, commentators, or book structure
-- DO ask about: Krishna's teachings, their meaning, and how they apply to life
-- Questions should test if someone UNDERSTOOD the teaching, not if they READ the book
+deeply, deep, understanding, understand, analyze, analyze,
+comprehension, why, how does, explain, apply, apply to life,
+untuk ujian, pemahaman, analisis
+```
+
+**Default mode: trivia** — definitions, facts, straightforward recall.
+
+**Update QNA_PROMPT:**
+```python
+QNA_PROMPT_TRIVIA = """... Generate {count} trivia Q&A pairs. Focus on definitions, facts, key terms. Simple recall questions. ..."""
+
+QNA_PROMPT_COMPREHENSION = """... Generate {count} comprehension Q&A pairs. Focus on WHY, HOW, ANALYSIS, APPLICATION. Deep understanding. ..."""
+```
+
+**Implementation in `app/rag/prompts.py`:**
+```python
+def detect_qna_mode(query: str) -> str:
+    comprehension_keywords = [
+        "deeply", "deep", "understanding", "understand",
+        "analyze", "analisis", "comprehension", "pemahaman",
+        "why", "how does", "explain", "apply", "untuk ujian"
+    ]
+    if any(kw in query.lower() for kw in comprehension_keywords):
+        return "comprehension"
+    return "trivia"
+```
+
+### Fix 4: Context-Aware Follow-ups
+
+**Problem:** User says "quiz me" → gets quiz → says "make it harder" → system doesn't know which topic.
+
+**Solution: Pass last query as context**
+
+```python
+# In app/api.py — add optional context fields
+class QuizRequest(BaseModel):
+    topic: str
+    count: int = 5
+    difficulty: str = "normal"
+    document: str | None = None
+    context: str | None = None  # Previous query for follow-ups
+```
+
+**When `context` is provided:**
+- Use it to resolve ambiguous references
+- "make it harder" + context="quiz on Bab 3" → quiz on Bab 3 with harder difficulty
+- "from the other book" + context="quiz from Bhagavad Gita" → quiz from other book
+
+**Implementation:**
+```python
+# In brain handler — resolve follow-up
+def resolve_topic(topic: str, context: str | None) -> str:
+    if not context:
+        return topic
+    # If topic is vague, use context
+    vague = ["it", "that", "this", "harder", "easier", "more", "another"]
+    if any(v in topic.lower() for v in vague):
+        return context  # Fall back to previous topic
+    return topic
+```
+
+**Example flow:**
+```
+User: "Quiz me on Bab 3"
+  → topic="Bab 3", trivia mode
+  → response includes: {"context": "Bab 3"}
+
+User: "Make it harder"
+  → topic="Make it harder", context="Bab 3"
+  → resolved: topic="Bab 3", difficulty="advanced"
+```
+
+**API response always includes context for next call:**
+```json
+{"result": "...", "status": "ok", "context": "Bab 3"}
 ```
 
 ---
@@ -94,7 +173,8 @@ Current prompt asks for "DEEP understanding" but doesn't explicitly exclude:
 |----------|-----|--------|--------|
 | P0 | Add `document` param to quiz/summarize/qna | Medium | High |
 | P1 | Improve retrieval (filter glossary) | Medium | High |
-| P2 | Improve Q&A prompt | Small | Medium |
+| P2 | Adaptive Q&A mode (trivia vs comprehension) | Small | Medium |
+| P3 | Context-aware follow-ups | Medium | High |
 
 ---
 
