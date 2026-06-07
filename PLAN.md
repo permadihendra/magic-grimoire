@@ -3,7 +3,20 @@
 > Canonical development roadmap. Completed items stay marked ✅ for reference.
 > In-progress items marked 🔨. Planned items show priority.
 
-## Status: All phases complete ✅ — Maintenance + optimization mode
+## Status: All phases complete ✅ — OpenClaw integration live ✅
+
+---
+
+## ✅ Phase 7: OpenClaw Integration (NEW)
+
+- REST API at `/api/tools/*` — exposes all study tools as HTTP endpoints
+- OpenClaw skill at `skills/magic-grimoire/SKILL.md` — auto-discovered by OpenClaw
+- Document filtering — `document` param on quiz/summarize/qna/ask endpoints
+- Adaptive Q&A mode — trivia (default) vs comprehension (keyword-triggered)
+- Context-aware follow-ups — API returns `context` field for next query
+- Agent-level query refinement — skill teaches OpenClaw to expand vague queries
+- Symlink install — `~/.openclaw/skills/magic-grimoire → repo/skills/magic-grimoire`
+- Service fallback — skill auto-starts service if unreachable
 
 ---
 
