@@ -868,13 +868,14 @@ async def retrieve_passages(query: str, document: str | None = None, chat_id: in
         return []
 
 
-async def generate_quiz(topic: str, count: int = 5, difficulty: str = "normal", chat_id: int | None = None) -> str:
+async def generate_quiz(topic: str, count: int = 5, difficulty: str = "normal", chat_id: int | None = None, document: str | None = None) -> str:
     """Generate practice questions on a topic.
 
     Args:
         topic: Subject to quiz on.
         count: Number of questions (1-20).
         difficulty: 'simple', 'normal', or 'advanced'.
+        document: Optional document name to focus on.
 
     Used by BrainPlugin's quiz() tool.
     """
@@ -932,8 +933,12 @@ async def generate_quiz(topic: str, count: int = 5, difficulty: str = "normal", 
         return f"⚠️ Quiz generation failed: {e}"
 
 
-async def summarize_topic(topic: str, chat_id: int | None = None) -> str:
+async def summarize_topic(topic: str, chat_id: int | None = None, document: str | None = None) -> str:
     """Generate a summary of a topic.
+
+    Args:
+        topic: Subject to summarize.
+        document: Optional document name to focus on.
 
     Used by BrainPlugin's summarize() tool.
     """
