@@ -9,6 +9,23 @@ REST API for study tools. Base URL: `http://localhost:8123/api`
 
 All endpoints accept JSON POST body unless noted. Responses: `{"result": "...", "status": "ok"}`
 
+## Service Check
+
+Before calling any tool, verify service is running:
+
+```bash
+curl -sf http://localhost:8123/api/health
+```
+
+If unreachable, start the service:
+
+```bash
+cd ~/my-projects/magic-grimoire && bash app/start-bot.sh &>/dev/null & sleep 3
+curl -sf http://localhost:8123/api/health
+```
+
+If still unreachable after start, inform user: "Magic Grimoire is not running. Please check `cd ~/my-projects/magic-grimoire && bash app/start-bot.sh`"
+
 ### Health Check
 ```
 GET /api/health
@@ -84,4 +101,18 @@ All tool endpoints return:
 If error:
 ```json
 {"detail": "Error message"}
+```
+
+## Installation
+
+Symlink from OpenClaw skills directory (auto-syncs with repo):
+
+```bash
+ln -sfn ~/my-projects/magic-grimoire/skills/magic-grimoire \
+  ~/.openclaw/skills/magic-grimoire
+```
+
+Verify:
+```bash
+ls -la ~/.openclaw/skills/magic-grimoire
 ```
