@@ -167,13 +167,47 @@ def _parse_tool(line: str) -> tuple[str, dict] | None:
 
     params: dict = {}
     if raw_params:
-        for part in raw_params.split(","):
+        # Split by comma, but respect quoted strings
+        parts = []
+        current = ""
+        in_quote = False
+        quote_char = None
+        for c in raw_params:
+            if c in ('"', "'") and not in_quote:
+                in_quote = True
+                quote_char = c
+            elif c == quote_char and in_quote:
+                in_quote = False
+                quote_char = None
+            elif c == "," and not in_quote:
+                parts.append(current.strip())
+                current = ""
+                continue
+            current += c
+        if current.strip():
+            parts.append(current.strip())
+
+        # Map tool name → first positional arg name
+        _FIRST_ARG = {
+            "ask": "query", "quiz": "topic", "summarize": "topic",
+            "qna": "topic", "chat": "text", "retrieve": "query",
+            "feedback": "type",
+        }
+
+        # Parse each part as key=value or positional value
+        for part in parts:
             part = part.strip()
             if "=" in part:
                 key, val = part.split("=", 1)
                 key = key.strip()
                 val = val.strip().strip('"').strip("'")
                 params[key] = val
+            else:
+                # Positional arg — assign to first positional key for this tool
+                val = part.strip().strip('"').strip("'")
+                first_key = _FIRST_ARG.get(name, "query")
+                if first_key not in params:
+                    params[first_key] = val
 
     return name, params
 

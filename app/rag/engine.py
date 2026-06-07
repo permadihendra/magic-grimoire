@@ -23,6 +23,9 @@ from app.rag.prompts import (
     get_quiz_prompt,
     SUMMARY_PROMPT,
 )
+from app.rag.query_refiner import refine_query
+from app.rag.reranker import rerank_chunks
+from app.rag.bm25_fallback import bm25_search
 
 logger = logging.getLogger(__name__)
 
@@ -107,16 +110,18 @@ class RAGEngine:
         self._index = index
         self._retriever = None
 
-    def _get_retriever(self) -> VectorIndexRetriever:
-        if self._retriever is not None:
-            return self._retriever
+    def _get_retriever(self, top_k: int | None = None) -> VectorIndexRetriever:
+        """Get retriever with optional top_k override.
+
+        Does not cache — recreating is cheap and avoids stale top_k.
+        """
         if self._index is None:
             raise RuntimeError("No index available")
-        self._retriever = VectorIndexRetriever(
+        k = top_k or settings.retrieval_top_k
+        return VectorIndexRetriever(
             index=self._index,
-            similarity_top_k=settings.retrieval_top_k,
+            similarity_top_k=k,
         )
-        return self._retriever
 
     # ── Retrieve only (no LLM generation) ─────────────────
 
@@ -131,7 +136,7 @@ class RAGEngine:
         Returns:
             List of dicts with keys: text, filename, score.
         """
-        retriever = self._get_retriever()
+        retriever = self._get_retriever(top_k=settings.retrieval_top_k)  # over-retrieve (20)
         nodes = retriever.retrieve(question)
 
         # Apply document boosting
@@ -162,10 +167,21 @@ class RAGEngine:
                 doc_nodes.sort(key=lambda n: n.score or 0, reverse=True)
                 other_nodes.sort(key=lambda n: n.score or 0, reverse=True)
                 forced_count = min(2, len(doc_nodes))
-                remaining = max(0, 5 - forced_count)
+                remaining = max(0, settings.reranker_top_k - forced_count)
                 nodes = doc_nodes[:forced_count] + other_nodes[:remaining]
         else:
             nodes.sort(key=lambda n: n.score or 0, reverse=True)
+
+        # Optional reranking for retrieve_only
+        if settings.use_reranker and len(nodes) > settings.reranker_top_k:
+            rerank_input = [
+                {"text": n.text or "", "filename": n.metadata.get("file_name", ""),
+                 "score": float(n.score) if n.score else 0.0, "_node": n}
+                for n in nodes
+            ]
+            reranked = rerank_chunks(question, rerank_input, top_k=settings.reranker_top_k)
+            if reranked:
+                nodes = [r["_node"] for r in reranked if "_node" in r]
 
         passages = []
         seen_files = set()
@@ -270,26 +286,33 @@ class RAGEngine:
             except Exception as e:
                 logger.warning("[%s]  index health check failed: %s", _qid, e)
 
-        # --- Phase 0: Knowledge cache check ---
-        if chat_id is not None:
-            try:
-                from app.rag.knowledge_cache import search_cache
-                cached = await search_cache(question, document, chat_id)
-                if cached and cached["similarity"] >= 0.92:
-                    return {
-                        "answer": cached["full_answer"],
-                        "sources": [{
-                            "filename": cached.get("source_doc", "Unknown"),
-                            "score": cached["similarity"],
-                        }],
-                        "processing": {"backend": "cache", "chunks": 0, "cache_hit": True, "elapsed_ms": (time.time()-_t0)*1000},
-                    }
-            except Exception as e:
-                logger.debug("Cache check failed: %s", e)
+        # --- Phase 0: Knowledge cache check (DISABLED — fresh generation every query) ---
+        # Cache was removed because repeated questions returned identical answers.
+        # Telegram already stores conversation history.
 
-        # --- Phase 1: Sync retrieval with document boosting + feedback ---
-        retriever = self._get_retriever()
-        nodes = retriever.retrieve(question)
+        # --- Phase 0.5: Query Refinement (Gemini) ---
+        queries = await refine_query(question)
+        logger.info("[%s]  [p0.5] Refined to %d queries", _qid, len(queries))
+
+        # --- Phase 1: Over-Retrieve with multi-query + merge ---
+        all_nodes = []
+        seen_node_ids = set()
+
+        retriever = self._get_retriever(top_k=settings.retrieval_top_k)  # 20
+
+        for q in queries:
+            q_nodes = retriever.retrieve(q)
+            for node in q_nodes:
+                nid = getattr(node, "node_id", node.text[:100])
+                if nid not in seen_node_ids:
+                    seen_node_ids.add(nid)
+                    all_nodes.append(node)
+
+        nodes = all_nodes
+        logger.info(
+            "[%s]  [p1] Retrieved %d unique chunks from %d queries",
+            _qid, len(nodes), len(queries),
+        )
 
         # Load feedback learner for this chat (if available)
         learner = None
@@ -333,7 +356,7 @@ class RAGEngine:
         else:
             nodes.sort(key=lambda n: n.score or 0, reverse=True)
 
-        # Extract unique sources
+        # Extract unique sources (baseline, may be overwritten by reranker)
         seen_files = set()
         sources = []
         for node in nodes:
@@ -344,6 +367,69 @@ class RAGEngine:
                     "filename": fname,
                     "score": float(node.score) if node.score else 0.0,
                 })
+
+        # --- Phase 1.5: Cross-Encoder Reranking ---
+        chunk_texts_for_rerank = [n.text for n in nodes if n.text]
+        if settings.use_reranker and len(nodes) > settings.reranker_top_k:
+            rerank_input = [
+                {"text": n.text or "", "filename": n.metadata.get("file_name", "Unknown"),
+                 "score": float(n.score) if n.score else 0.0, "_node": n}
+                for n in nodes
+            ]
+            reranked = rerank_chunks(question, rerank_input, top_k=settings.reranker_top_k)
+            if reranked:
+                nodes = [r["_node"] for r in reranked if "_node" in r]
+                # Rebuild sources from reranked results
+                sources = []
+                seen_files = set()
+                for r in reranked:
+                    fname = r.get("filename", "Unknown")
+                    if fname not in seen_files and len(sources) < _MAX_SOURCES:
+                        seen_files.add(fname)
+                        sources.append({
+                            "filename": fname,
+                            "score": r.get("rerank_score", r.get("score", 0.0)),
+                        })
+                logger.info(
+                    "[%s]  [p1.5] Reranked: %d -> %d chunks",
+                    _qid, len(rerank_input), len(nodes),
+                )
+            else:
+                logger.warning("[%s]  [p1.5] Reranker returned empty", _qid)
+
+        # --- Phase 1.7: BM25 Fallback (if rerank returned too few) ---
+        if settings.use_bm25_fallback and len(nodes) < 2:
+            logger.info("[%s]  [p1.7] Trying BM25 fallback", _qid)
+            try:
+                all_index_nodes = []
+                for _doc_id, doc_node in self._index.docstore.docs.items():
+                    all_index_nodes.append({
+                        "text": doc_node.text or "",
+                        "filename": doc_node.metadata.get("file_name", "Unknown"),
+                        "score": 0.0,
+                    })
+                bm25_results = bm25_search(question, all_index_nodes, top_k=settings.reranker_top_k)
+                if bm25_results:
+                    # Use BM25 results as chunk_texts directly
+                    chunk_texts_for_rerank = [r["text"] for r in bm25_results if r.get("text")]
+                    # Rebuild sources from BM25
+                    sources = []
+                    seen_files = set()
+                    for r in bm25_results:
+                        fname = r.get("filename", "Unknown")
+                        if fname not in seen_files and len(sources) < _MAX_SOURCES:
+                            seen_files.add(fname)
+                            sources.append({
+                                "filename": fname,
+                                "score": r.get("bm25_score", 0.0),
+                            })
+                    logger.info(
+                        "[%s]  [p1.7] BM25 found %d chunks", _qid, len(bm25_results),
+                    )
+                else:
+                    logger.info("[%s]  [p1.7] BM25 found nothing", _qid)
+            except Exception as e:
+                logger.warning("[%s]  [p1.7] BM25 fallback failed: %s", _qid, e)
 
         # --- Validate: no source nodes found ---
         if not sources:
@@ -362,9 +448,35 @@ class RAGEngine:
                 "processing": {"backend": _backend(), "chunks": 0, "cache_hit": False, "elapsed_ms": (time.time()-_t0)*1000},
             }
 
-        # --- GUARDRAIL: Validate chunks before LLM call ---
-        chunk_texts = [n.text for n in nodes if n.text]
+        # --- GUARDRAIL: Token-aware chunk selection ---
+        # Select chunks that fit within the context window budget
+        # Never exceed ctx - system_prompt - query = available tokens for chunks
+        ctx_window = settings.llm_context_window
+        SYSTEM_PROMPT_TOKENS = 250   # TreeSummarize system + user prompt
+        QUERY_TOKENS = 50            # User query + template overhead
+        chunk_budget = ctx_window - SYSTEM_PROMPT_TOKENS - QUERY_TOKENS  # ~1748 for 2048 ctx
+
+        raw_texts = [n.text for n in nodes if n.text] if nodes else chunk_texts_for_rerank
+
+        # Token-aware selection: pick chunks until budget is full
+        chunk_texts = []
+        total_tokens = 0
+        for text in raw_texts:
+            chunk_tokens = int(len(text.split()) * 1.3)
+            if total_tokens + chunk_tokens > chunk_budget:
+                logger.info(
+                    "[%s] Token budget: stopping at %d chunks (%d/%d tokens)",
+                    _qid, len(chunk_texts), total_tokens, chunk_budget,
+                )
+                break
+            chunk_texts.append(text)
+            total_tokens += chunk_tokens
+
         chunk_count = len(chunk_texts)
+        logger.info(
+            "[%s] Token-aware selection: %d chunks, ~%d/%d tokens",
+            _qid, chunk_count, total_tokens, chunk_budget,
+        )
 
         if chunk_count == 0:
             logger.warning("[%s] No chunks retrieved — skipping LLM call", _qid)
@@ -378,24 +490,14 @@ class RAGEngine:
                 "processing": {"backend": _backend(), "chunks": 0, "cache_hit": False, "elapsed_ms": (time.time()-_t0)*1000},
             }
 
-        # Token budget check
-        total_input_tokens = sum(len(t.split()) * 1.3 for t in chunk_texts)
-        system_prompt_tokens = 250
-        available_for_response = 2048 - total_input_tokens - system_prompt_tokens
-        if total_input_tokens > 1800:
-            logger.warning("[%s] Token budget high: ~%d input + %d system > 2048 ctx",
-                          _qid, int(total_input_tokens), system_prompt_tokens)
+        # Safety check: verify we didn't overshoot (should never happen with token-aware selection)
+        available_for_response = ctx_window - total_tokens - SYSTEM_PROMPT_TOKENS
         if available_for_response < 50:
-            logger.error("[%s] Insufficient context headroom: %d tokens", _qid, int(available_for_response))
-            return {
-                "answer": "⚠️ *Context window too full.* Try a more specific question.",
-                "sources": sources,
-                "processing": {"backend": _backend(), "chunks": chunk_count, "cache_hit": False, "elapsed_ms": (time.time()-_t0)*1000},
-            }
+            logger.error("[%s] Safety: headroom=%d after selection — this should not happen", _qid, int(available_for_response))
 
         # --- Phase 2: LLM generation with timeout + fallback ---
         logger.info("[%s]  [p2] LLM START chunks=%d ~%d tokens (headroom=%d)",
-                    _qid, chunk_count, int(total_input_tokens), int(available_for_response))
+                    _qid, chunk_count, int(total_tokens), int(available_for_response))
 
         from app.rag.models import get_llm
         from app.rag.guard import OllamaGuard, OllamaBusyError, OllamaDeadError
@@ -527,15 +629,15 @@ class RAGEngine:
             "or a `summary` of the key points? Just ask!"
         )
 
-        # Diagnostics footer: chunk count + token size
-        chunk_texts = [n.text for n in nodes if n.text]
-        total_tokens = sum(len(t.split()) * 1.3 for t in chunk_texts)
-        total_words = int(total_tokens * 0.75)  # ~0.75 words per token
+        # Diagnostics footer: use the token count from selection phase
+        total_words = int(total_tokens * 0.75)
+        refine_info = f" | refine={len(queries)}" if len(queries) > 1 else ""
+        rerank_info = " | reranked" if settings.use_reranker else ""
         diag = (
             f"📊 *Retrieval:* {len(chunk_texts)} chunks | "
             f"~{int(total_tokens)} tokens (~{total_words} words) | "
-            f"k={settings.retrieval_top_k} | "
-            f"ctx=2048"
+            f"k={settings.retrieval_top_k}{refine_info}{rerank_info} | "
+            f"ctx={settings.llm_context_window}"
         )
         follow_up_parts.append(diag)
 
@@ -551,19 +653,8 @@ class RAGEngine:
         # Remove old next-step and diagnostics from answer (they were added earlier)
         # We rebuild the answer to only include answer + citations
 
-        # Store in knowledge cache for future queries
-        if chat_id is not None and len(answer.strip()) >= 100:
-            try:
-                from app.rag.knowledge_cache import store_pair
-                import asyncio as _asyncio
-                _asyncio.create_task(
-                    store_pair(question, answer, 
-                               source_doc=sources[0]["filename"] if sources else None,
-                               retrieval_score=top_score,
-                               chat_id=chat_id, approved=False)
-                )
-            except Exception as e:
-                logger.debug("Cache store failed: %s", e)
+        # Knowledge cache disabled — fresh generation every query.
+        # Telegram stores conversation history; no need for duplicate cache.
 
         _total_ms = (time.time()-_t0)*1000
         logger.info("[%s] >>> q_with_sources DONE %d chars (%.0fms total)",

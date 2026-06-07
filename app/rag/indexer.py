@@ -176,8 +176,12 @@ def _try_simple_dir(fname: str) -> ParseResult:
                            word_count=0, char_count=0, error=str(e))
 
 
-def _try_calibre(fname: str) -> ParseResult:
-    """Try parsing with Calibre CLI (ebook-convert → TXT)."""
+def _try_calibre(raw_bytes: bytes, fname: str) -> ParseResult:
+    """Try parsing with Calibre CLI (ebook-convert → TXT).
+
+    Note: raw_bytes is accepted for API consistency but unused —
+    Calibre reads from the file path directly.
+    """
     try:
         # Check if calibre is available
         result = subprocess.run(

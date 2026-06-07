@@ -3,13 +3,7 @@
 > Canonical development roadmap. Completed items stay marked ✅ for reference.
 > In-progress items marked 🔨. Planned items show priority.
 
-## Status: All phases complete ✅
-
-This project is in **maintenance mode**. Focus areas:
-- Stability on 8GB GPU (Ollama crash prevention, CPU fallback)
-- Accurate document parsing (multi-method, pre-index verify)
-- Consistent UI across all commands (source citations, metadata, diagnostics)
-- Performance optimization (GPU utilization, timeout tuning)
+## Status: All phases complete ✅ — Maintenance + optimization mode
 
 ---
 
@@ -25,15 +19,15 @@ This project is in **maintenance mode**. Focus areas:
 ### ✅ Phase 2: RAG Core
 - `models.py` — Ollama LLM (magic-grimoire:3b) + FallbackEmbedding
 - `indexer.py` — multi-method parsing (ebooklib → LiteParse → Calibre → SimpleDirectoryReader)
-- `engine.py` — `query_with_sources()` with 7 guardrails + TreeSummarize
+- `engine.py` — `query_with_sources()` with 7 guardrails + TreeSummarize + 120s timeout
 - `prompts.py` — QA / Quiz / Summary / QnA with difficulty variants
-- `guard.py` — OllamaGuard: VRAM pre-check + semaphore + OOM recovery
+- `guard.py` — OllamaGuard: VRAM pre-check (async) + semaphore + OOM recovery
 - `feedback.py` — FeedbackLearner: per-chat document penalty/boost
 
 ### ✅ Phase 3: Agentic Brain (Gemini)
 - BrainPlugin intercepts all free text
-- `AGENT_PROMPT` — tool definitions, rules, format examples (ask, quiz, summarize, **qna**, list_docs, chat, feedback, retrieve)
-- `_TOOL_REGISTRY` — 8 tools registered
+- `AGENT_PROMPT` — tool definitions, rules, format examples
+- `_TOOL_REGISTRY` — 9 tools: ask, quiz, summarize, qna, list_docs, chat, feedback, retrieve, delete
 - `_SLOW_TOOLS` — ask/quiz/summarize/qna trigger thinking indicator
 - `_conversation_memory` — last 5 exchanges per chat
 - Detection footer — shows "ℹ️ from training data" when no TOOL used
@@ -41,26 +35,28 @@ This project is in **maintenance mode**. Focus areas:
 ### ✅ Phase 4: UX & Progress
 - Warm-up on startup (2-token request → pre-loads LLM into VRAM)
 - ProgressWatcher — phase-aware, sends Telegram edits at 0.5s, 30s, 60s, 120s+
-- Knowledge cache — Q&A pairs with cosine similarity, bypasses RAG on hit ≥ 0.92
-- Multi-message splitting — `_split_into_chunks()` for replies > 4000 chars
-- Follow-up footer sent as separate message (next-step + diagnostics)
+- Knowledge cache removed — fresh generation every time
+- `_safe_truncate()` — 4000 char Telegram safety
 - Display names — Gemini cleans filenames at index time
 
 ### ✅ Phase 5: Stability (Critical)
 - Fresh sqlite3 per operation — no background-thread corruption during GPU load
 - FallbackEmbedding — Ollama embed crash → auto-switch to CPU all-MiniLM-L6-v2
-- `embed_batch_size=3` — prevents Ollama Go runner crash
-- OllamaGuard `Semaphore(1)` — only 1 Ollama operation at a time
-- `_tool_chat()` wrapped with OllamaGuard (was unguarded)
-- `ollama_check_vram()` uses async subprocess (was blocking event loop)
-- PDF parsing timeout (30s per method) + LiteParse for OCR
+- embed_batch_size=3 — was 10, too many concurrent calls crashed Go runner
+- VRAM pre-check before every Ollama call (OllamaGuard) — async nvidia-smi
+- TreeSummarize 120s hard timeout → fallback simple prompt
+- `num_ctx=4096` — enough headroom for long answers
+- `temperature=0.1` — slight variation for repeated questions
+- `_tool_chat()` wrapped in OllamaGuard — prevents concurrent Ollama calls
 
 ### ✅ Phase 6: Index Verification
 - `pre_index_check_single()` — test-parse each file before building
-- `parse_document_multimethod()` — tries 4 parsers in order (ebooklib → LiteParse → Calibre → SimpleDirectoryReader)
+- `parse_document_multimethod()` — tries 4 parsers in order
 - `probe_index()` — test retrieval after build to confirm usability
 - `parse_method` + `verified` columns in DB
+- Block on all-fail — never says "success" when 0 docs parsed
 - Per-file report with parse method, word count, chunks, probe status
+- `os.path.basename` for consistent file_name metadata
 
 ### ✅ Phase 7: Command UI Audit
 - `_build_file_card()` — consistent document card (size, words, chunks, parse method, verified)
@@ -69,75 +65,77 @@ This project is in **maintenance mode**. Focus areas:
 - `/docs` → word counts, parse methods, probe verified flags
 - `/files` → display names, indexed vs pending, chunk counts
 - `/delete` → impact report (size, words, chunks) before confirming
-- `/quiz` + `/summarize` → source citations + next-step + retrieval stats
+- `/quiz` + `/summarize` → source citations + next-step + retrieval stats (same pattern as `/ask`)
 
-### ✅ Phase 8: Performance Optimization
-- **100% GPU utilization** — `num_gpu 99` (all layers on GPU, was 1)
-- **Power efficiency** — MSI Afterburner 80% power cap (host-side)
-- **Synthesis timeout** — increased to 120s (was 30s)
-- **OllamaGuard timeout** — increased to 180s (was 120s)
-- **num_predict** — 2048 (was 128 from Modelfile, now sent via API)
-- **num_ctx** — 2048 via Modelfile, 4096 via API `additional_kwargs`
-- **Generation speed** — ~40 tok/s (was ~10-15 tok/s with num_gpu 1)
+### ✅ Phase 8: QnA Command
+- `/qna` slash command + Gemini tool routing
+- Generic prompt examples (no content anchoring)
+- `generate_qna()` module-level function for brain handler
+- Pre-retrieval preview (passage names shown before generation)
 
----
+### ✅ Phase 9: Freshness & Cache Removal
+- Knowledge cache removed from `engine.py` — no stale answers
+- Temperature 0.0 → 0.1 — slight variation across sessions
+- Prompt templates updated with "vary between sessions" instructions
+- `_qna_history` removed — every `/qna` call is independent
 
-## Current Resource Profile
-
-| Component | Model | VRAM | Notes |
-|---|---|---|---|
-| LLM | `magic-grimoire:3b` (qwen2.5:3b Q4_0) | 1.9 GB | All layers on GPU (`num_gpu 99`) |
-| KV cache | 2048 context window | ~2.4 GB | Managed by Ollama |
-| Embeddings | `nomic-embed-text` (batch=3) | 0.3 GB | Falls back to CPU `all-MiniLM-L6-v2` |
-| **Total** | | **~4.6 GB** | 3.4 GB headroom on 8 GB |
-| Power | GPU capped at 80% via MSI Afterburner | ~100W | Safe for 24/7 operation |
-
-### Key Parameters
-
-| Parameter | Value | Purpose |
-|---|---|---|
-| `num_gpu` | 99 | All layers on GPU for max throughput |
-| `num_ctx` (Modelfile) | 2048 | KV cache budget |
-| `num_ctx` (API) | 4096 | Extra headroom via `additional_kwargs` |
-| `num_predict` | 2048 | Max output tokens (~50s at 40 tok/s) |
-| `temperature` | 0.0 | Deterministic output |
-| Synthesis timeout | 120s | Max LLM generation wait |
-| OllamaGuard timeout | 180s | Outer safety boundary |
-| Gateway timeout | 300s | Dispatch-level boundary |
+### ✅ Phase 10: Safety Fixes
+- `_tool_chat()` wrapped in OllamaGuard — prevents concurrent Ollama calls
+- `ollama_check_vram()` uses `asyncio.create_subprocess_exec` — no event loop blocking
+- Follow-up ordering fixed — `_tool_ask` returns tuple, brain handler sends follow-up last
+- Timeout chain updated: OllamaGuard 180s → TreeSummarize 120s → fallback 60s
 
 ---
 
-## Commands
+## 🔨 In Progress / Known Issues
 
-| Command | Handler | Description |
-|---|---|---|
-| `/ask <q>` | `StudyPlugin._handle_ask()` | RAG query with source citations |
-| `/quiz <topic>` | `StudyPlugin._handle_quiz()` | Practice questions with answers |
-| `/summarize <topic>` | `StudyPlugin._handle_summarize()` | Topic summary |
-| `/qna <topic>` | `StudyPlugin._handle_qna()` | Comprehension Q&A pairs (default 10) |
-| `/docs` | `StudyPlugin._handle_docs()` | Document library with metadata |
-| `/index` | `StudyPlugin._handle_index()` | Pre-check → parse → embed → probe |
-| `/files` | `StudyPlugin._handle_files()` | All files on disk with indexed status |
-| `/delete <id>` | `StudyPlugin._handle_delete()` | Delete file + show impact |
-| Free text | `BrainPlugin.handle()` | Gemini routes to appropriate tool |
+### `num_gpu=99` in Modelfile — Should Be 1
+`Modelfile.3b` has `PARAMETER num_gpu 99`. For Q4_0 quantized models, this should be `1`.
+`99` is for layered models (e.g., GGUF with many layers). Quantized models use single-layer GPU.
+**Impact:** May cause Ollama to try loading too many GPU layers → potential OOM on 8GB.
+**File:** `Modelfile.3b:12`
+
+### `num_predict=2048` — May Be Too Large
+Currently 2048 tokens max output. At ~40 tok/s, that's ~50s generation.
+`num_ctx=4096` + `num_predict=2048` = large KV cache + long output = more VRAM pressure.
+**Consideration:** If VRAM is tight, reduce to 1024. If stable, keep at 2048.
+
+### TOCTOU Race in OllamaGuard
+`_ollama_sem.locked()` check before `acquire()` has a race window.
+Low risk — `acquire()` is atomic, worst case is a slightly delayed "busy" message.
+**File:** `app/rag/guard.py:141-144`
 
 ---
 
 ## Future Improvements
 
-### 🟡 Streaming output (high priority)
+### ✅ RAG v2 — Retrieval Quality Overhaul (highest impact)
+Three new pipeline stages added to `query_with_sources()`:
+
+1. **Query Refiner (Gemini)** — strip filler, expand keywords (~50ms)
+2. **Over-Retrieve + Cross-Encoder Reranker** — top 20 → rerank → top 5 (~0.5GB VRAM)
+3. **BM25 Fallback** — keyword search when rerank returns empty
+
+**Files:** `app/rag/reranker.py`, `app/rag/query_refiner.py`, `app/rag/bm25_fallback.py`
+**Config:** `use_query_refiner`, `use_reranker`, `use_bm25_fallback` — all in `config.py`
+**Rollback:** Set all three to `False` to revert to old pipeline
+
+### 🟡 Streaming Output (high priority)
 Token-by-token LLM output to Telegram via `editMessageText`.
 Currently: user waits for full generation → single edit.
+Target: tokens appear progressively.
 
-### 🟡 Multi-turn agentic loop (high priority)
+### 🟡 Multi-turn Agentic Loop (high priority)
 Gemini sees tool output and can chain → retry with feedback, follow-up questions,
 combined ask+quiz responses.
 
-### 🟢 Hybrid search (medium priority)
+### 🟢 Hybrid Search (medium priority)
 BM25 + vector for keyword-heavy queries (e.g. exact chapter/section names).
+Pairs with RAG v2's BM25 fallback.
 
-### 🟢 LLM reranker (medium priority)
-Small model (cross-encoder) reranks retrieved chunks before generation.
+### 🟢 Better Filename Cleaning (medium priority)
+Gemini filename cleaner → fallback to `_simple_clean_filename()` if Gemini fails.
+Currently: raises on Gemini error, falls back to simple.
 
 ### 🔴 Upload via Telegram (low priority)
 Send PDF/EPUB directly in chat → bot saves to docs/ and triggers `/index`.
@@ -150,17 +148,93 @@ Currently: manual file copy to `app/docs/`.
 | Issue | Root Cause | Fix |
 |---|---|---|
 | WSL crash during `/index` | Ollama Go runner crashed on batch embed → GPU passthrough panic | embed_batch_size=3 + FallbackEmbedding |
-| "unknown error" in `/index` result | `file_name` metadata stored as full path | `os.path.basename()` everywhere |
+| "unknown error" in `/index` result | `file_name` metadata stored as full path, compared against basename | `os.path.basename()` everywhere |
+| "table has no column word_count" | New column not in existing DB | ALTER TABLE ADD COLUMN in init_db |
+| "Can't instantiate abstract class FallbackEmbedding" | Missing `_aget_query_embedding`, `_get_query_embedding` | Added both methods |
 | DB corruption on index rebuild | aiosqlite background thread writing during GPU load | Fresh sqlite3 per operation + WAL |
 | FTS5 DELETE corrupting DB | FTS5 DELETE conflicts with main table WAL | Removed FTS5, used keyword matching |
 | Empty index → TreeSummarize hang | No chunks to synthesize → LlamaIndex bug | L1: 0 chunks → early return |
-| `num_predict` silently ignored | LlamaIndex Ollama class swallows `num_predict` kwarg | Use `additional_kwargs` dict |
-| Slow generation (~15 tok/s) | `num_gpu 1` — only 1 of ~24 layers on GPU | `num_gpu 99` — all layers on GPU (~40 tok/s) |
-| `/qna` timeout | `llm.acomplete()` with 3000+ token prompt | Use `TreeSummarize` via `query_with_sources(mode="qna")` |
-| Follow-up sent before answer | `_tool_ask()` sent follow_up via `sendMessage` before returning | Return `(answer, follow_up)` tuple, brain handler sends last |
-| PDF parsing hangs | `SimpleDirectoryReader` could hang on scanned PDFs | 30s timeout per parser method + LiteParse for OCR |
-| Follow-up footer never sent | `ask_query()` discarded dict fields, returned only string | Return dict with `follow_up`, handled by gateway/brain handler |
-| `_tool_chat()` concurrent crash | Direct Ollama call without OllamaGuard | Wrapped with `OllamaGuard` |
-| `nvidia-smi` blocking event loop | `subprocess.run()` in async context | Switched to `asyncio.create_subprocess_exec()` |
-| `/qna` only 1 pair shown | Strict `[N] Q:` parsing failed on TreeSummarize output | Raw output display + regex counting |
-| `partial_format` error | Plain string passed as `summary_template` to TreeSummarize | Wrap in `PromptTemplate` object |
+| Gemini ignoring RAG tools | "Helpful but lazy" — answers from training data | Detection footer + stronger prompt |
+| `/qna` shows 1 pair instead of 10 | Strict parser fails on model output variations | Raw output display + pattern counting |
+| QnA always returns Krishna content | Hardcoded examples in QNA_PROMPT | Generic placeholder examples |
+| Same answer every time | Knowledge cache + temperature 0.0 | Cache removed, temp 0.1, prompt variation |
+| `_tool_chat` bypasses guard | Direct Ollama call without OllamaGuard | Wrapped in OllamaGuard |
+| `subprocess.run` blocks event loop | Synchronous nvidia-smi call | Switched to asyncio.create_subprocess_exec |
+| Follow-up sent before answer | `_tool_ask` sent follow-up via Telegram before returning | Tuple return, brain handler sends last |
+
+---
+
+## VRAM Budget (RTX 3050 8GB)
+
+| Component | VRAM |
+|---|---|
+| LLM weights (magic-grimoire:3b) | 1.9 GB |
+| KV cache (4096 ctx) | ~2.4 GB |
+| Ollama embed (nomic-embed-text) | 0.3 GB |
+| **Total used** | **~4.6 GB** |
+| **Headroom** | **~3.4 GB** |
+
+CPU fallback (sentence-transformers) uses 0 VRAM — available when Ollama embed fails.
+Cross-encoder reranker (if added): ~0.5 GB — fits within headroom.
+
+---
+
+## Architecture: Message Flow
+
+```
+Telegram message
+  ↓
+gateway.py (POST /telegram) → parse update
+  ↓
+dispatcher.py (dispatch update)
+  ├─ Slash command → Plugin.handle() by command
+  └─ Free text    → BrainPlugin.handle() [Gemini agent]
+        ↓
+        Gemini classifies intent + decides tools
+        ↓
+        ┌─ ask()      → study/handler.ask_query() → engine.query_with_sources()
+        ├─ quiz()     → study/handler.generate_quiz()
+        ├─ summarize()→ study/handler.summarize_topic()
+        ├─ qna()      → study/handler.generate_qna()
+        ├─ list_docs()→ brain/handler._tool_list_docs_v2()
+        ├─ feedback() → rag/feedback.py FeedbackLearner
+        ├─ retrieve() → rag/engine.retrieve_only()
+        └─ chat()     → Ollama direct (guarded by OllamaGuard)
+              ↓
+        Response edited into Telegram "thinking" message
+```
+
+---
+
+## Common Commands
+
+```bash
+bash app/start-bot.sh            # Always use this — manages cloudflared tunnel
+bash app/stop-bot.sh             # Kill all bot processes cleanly
+bash app/dependency-check.sh     # Verify all deps (--fix to auto-install)
+uv sync                          # Install deps
+uv sync --extra epub             # Install EPUB support (ebooklib + html2text)
+uv sync --extra dev              # Install dev deps
+uv run ruff check .              # Lint
+
+ollama list                      # Check models
+ollama show magic-grimoire:3b    # Inspect model info
+nvidia-smi                       # Check VRAM
+
+# Register webhook (one-time)
+uv run python -m app.bot.setup_webhook
+```
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Bot doesn't reply | Re-run `bash app/start-bot.sh` (cloudflared tunnel expired) |
+| "Model not found" | `ollama create magic-grimoire:3b -f Modelfile.3b` |
+| Index rebuild fails | `ollama serve` + `ollama list` to verify models |
+| "Ollama embed Go runner crashed" | Bot auto-switches to CPU fallback — retry `/index` |
+| "database disk image is malformed" | Delete `data/magic-grimoire.db` and restart |
+| PC crashed during `/index` | Install `sentence-transformers` for CPU fallback |
+| Wrong source cited | Say "that's from the wrong book" → feedback penalizes it |

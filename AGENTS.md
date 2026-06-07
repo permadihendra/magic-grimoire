@@ -6,7 +6,7 @@
 ## Project Overview
 
 **What it does:** Telegram bot + RAG study agent. Ingest PDFs/EPUBs → query them conversationally,
-get answers with source citations, generate quizzes, summarize topics.
+get answers with source citations, generate quizzes, Q&A pairs, summarize topics.
 
 **Stack:** Python 3.11+ · FastAPI · LlamaIndex · Ollama (local LLM) · sentence-transformers (CPU fallback embeddings) · Gemini 3.1 Flash Lite (agent brain) · sqlite3 (fresh per-op) · python-telegram-bot
 
@@ -34,15 +34,16 @@ app/
 │   ├── base.py              # Plugin ABC: name, commands, description, handle()
 │   │
 │   ├── brain/handler.py     # BrainPlugin — Gemini agent (agentic router)
-│   │   │                   #   Tools: ask, quiz, summarize, list_docs, chat,
-│   │   │                   #          feedback, retrieve, delete
+│   │   │                   #   Tools: ask, quiz, summarize, qna, list_docs,
+│   │   │                   #          chat, feedback, retrieve, delete
 │   │   │                   #   Intercepts all free-text messages
 │   │   └── __init__.py
 │   │
-│   ├── study/handler.py      # StudyPlugin — RAG backend (exposed via /ask, /quiz, /docs, /index, /files, /delete)
+│   ├── study/handler.py      # StudyPlugin — RAG backend
+│   │   │                   #   Slash: /ask, /quiz, /qna, /docs, /index, /files, /delete, /summarize
 │   │   │                   #   Functions used by BrainPlugin tools:
 │   │   │                   #   ask_query(), generate_quiz(), summarize_topic(),
-│   │   │                   #   retrieve_passages(), _tool_list_docs()
+│   │   │                   #   generate_qna(), retrieve_passages(), _tool_list_docs()
 │   │   └── __init__.py
 │   │
 │   └── system/handler.py     # SystemPlugin (/start, /help, /ping, /status)
@@ -54,12 +55,12 @@ app/
 │   │   │                   #   Key: parse_document_multimethod(), probe_index(), _sync_documents()
 │   ├── engine.py            # RAG engine: retrieval + TreeSummarize synthesis
 │   │   │                   #   Key: query_with_sources() → returns answer + sources + diagnostics
-│   ├── guard.py             # OllamaGuard (semaphore + VRAM check + OOM recovery)
+│   ├── guard.py             # OllamaGuard (semaphore + async VRAM check + OOM recovery)
 │   │   │                   #   Key: ollama_check_vram(), OllamaGuard.__aenter__()
 │   ├── feedback.py          # FeedbackLearner (per-chat document penalty/boost)
-│   ├── knowledge_cache.py   # Q&A pair cache with embedding cosine search
+│   ├── knowledge_cache.py   # Q&A pair cache (REMOVED FROM ACTIVE USE — kept for reference)
 │   ├── embeddings.py        # FallbackEmbedding (tries Ollama → auto-switches to CPU all-MiniLM-L6-v2)
-│   └── prompts.py           # QA / Quiz / Summary prompt templates (difficulty variants)
+│   └── prompts.py           # QA / Quiz / Summary / QnA prompt templates (difficulty variants)
 │
 ├── ui/
 │   ├── progress.py           # ProgressState + ProgressWatcher (phase-aware, escalating)
@@ -85,13 +86,14 @@ dispatcher.py (dispatch update)
         ↓
         Gemini classifies intent + decides tools
         ↓
-        ┌─ ask()   → study/handler.ask_query() → engine.query_with_sources()
-        ├─ quiz()  → study/handler.generate_quiz()
-        ├─ summarize() → study/handler.summarize_topic()
-        ├─ list_docs() → brain/handler._tool_list_docs_v2()
+        ┌─ ask()      → study/handler.ask_query() → engine.query_with_sources()
+        ├─ quiz()     → study/handler.generate_quiz()
+        ├─ summarize()→ study/handler.summarize_topic()
+        ├─ qna()      → study/handler.generate_qna()
+        ├─ list_docs()→ brain/handler._tool_list_docs_v2()
         ├─ feedback() → rag/feedback.py FeedbackLearner
         ├─ retrieve() → rag/engine.retrieve_only()
-        └─ chat()   → Ollama direct (no RAG)
+        └─ chat()     → Ollama direct (guarded by OllamaGuard)
               ↓
         Response edited into Telegram "thinking" message
 ```
@@ -102,23 +104,27 @@ dispatcher.py (dispatch update)
 
 ### `app/plugins/brain/handler.py` — Agent Brain
 - **`AGENT_PROMPT`** (system prompt at top): Tells Gemini how to route intents, tool syntax, rules
-- **`_tool_ask()`** — calls `ask_query()` → `query_with_sources()` → returns answer with citations
+- **`_tool_ask()`** — calls `ask_query()` → `query_with_sources()` → returns `(answer, follow_up)` tuple
 - **`_tool_quiz()`** — calls `generate_quiz()` with source info + next-step + stats footer
 - **`_tool_summarize()`** — calls `summarize_topic()` with source info + next-step + stats footer
+- **`_tool_qna()`** — calls `generate_qna()` with source info + next-step + stats footer
 - **`_tool_list_docs_v2()`** — lists documents with word counts, parse method, probe status
 - **`_tool_feedback()`** — records user feedback in FeedbackLearner per chat
 - **`_tool_retrieve()`** — fast retrieval pass (no LLM), returns raw passages
-- **`_tool_chat()`** — casual Ollama chat (no RAG)
+- **`_tool_chat()`** — casual Ollama chat (**wrapped in OllamaGuard** — prevents concurrent calls)
 - **`_conversation_memory`** — last 5 exchanges per chat for context
-- **`_TOOL_REGISTRY`** dict at bottom — maps tool names to handler functions
-- **`_SLOW_TOOLS = {"ask", "quiz", "summarize"}`** — trigger thinking indicator
+- **`_TOOL_REGISTRY`** dict — maps 9 tool names to handler functions
+- **`_SLOW_TOOLS = {"ask", "quiz", "summarize", "qna"}`** — trigger thinking indicator
 - If no `TOOL:` lines in Gemini response → appends "ℹ️ This answer came from my training data" footer
+- **Follow-up ordering:** Brain handler sends answer chunks first, then follow-up messages last
 
 ### `app/plugins/study/handler.py` — RAG Backend
-- **`ask_query()`** — main RAG query: ensure_index → query_with_sources → returns answer str
+- **`ask_query()`** — main RAG query: ensure_index → query_with_sources → returns `{answer, follow_up}`
 - **`generate_quiz()`** — retrieve_only (for sources) → query(mode="quiz") → append sources + next-step + stats
 - **`summarize_topic()`** — same pattern as generate_quiz but mode="summary"
+- **`generate_qna()`** — generate_qna(topic, count, chat_id) → Q&A pairs with source info
 - **`_handle_index()`** — 3-phase: pre-check (test-parse each file) → build index → post-build probe + per-file report
+- **`_handle_qna()`** — pre-retrieval preview → Q&A generation with generic examples
 - **`_handle_docs()`** — delegates to `_tool_list_docs_v2()`
 - **`_handle_files()`** — lists files on disk with indexed status + metadata from DB
 - **`_handle_delete()`** — deletes file, shows impact (word/chunk count from DB before deleting)
@@ -128,18 +134,16 @@ dispatcher.py (dispatch update)
 ### `app/rag/engine.py` — Query Engine
 - **`RAGEngine.query_with_sources()`** — the main method:
   1. Check index health (L1 guardrail)
-  2. Check knowledge cache (L0 fast path)
-  3. Sync retrieval + document boosting + feedback adjustment
-  4. Post-retrieval filtering: force named-doc chunks into context
-  5. L1b: 0 chunks → early return (no LLM call)
-  6. Token budget check → early return if insufficient headroom
-  7. L3-L6: OllamaGuard → TreeSummarize (30s hard timeout → fallback to simple prompt)
-  8. L7: Validate answer length → generic "no answer" if too short
-  9. Build source citations with score labels
-  10. Add next-step suggestion 💡
-  11. Add diagnostics footer 📊
-  12. Store in knowledge cache (async)
-  13. Return `{answer: str, sources: list[dict]}`
+  2. Sync retrieval + document boosting + feedback adjustment
+  3. Post-retrieval filtering: force named-doc chunks into context
+  4. L1b: 0 chunks → early return (no LLM call)
+  5. Token budget check → early return if insufficient headroom
+  6. L3-L6: OllamaGuard (180s) → TreeSummarize (120s timeout → fallback to simple prompt)
+  7. L7: Validate answer length → generic "no answer" if too short
+  8. Build source citations with score labels
+  9. Add next-step suggestion 💡
+  10. Add diagnostics footer 📊
+  11. Return `{answer: str, sources: list[dict], follow_up: str}`
 - **`_lookup_display_name()`** — maps basename → display_name from DB (memoized)
 - **`retrieve_only()`** — raw retrieval without LLM (used by quiz/summarize pre-check)
 - **`query()`** — legacy simple query (no sources, used by quiz/summary mode)
@@ -153,7 +157,7 @@ dispatcher.py (dispatch update)
 - **`_sync_documents()`** — writes to `documents` table: filename, filepath, file_size, display_name, word_count, chunk_count, parse_method, verified
 
 ### `app/rag/models.py` — Model Config
-- **`get_llm()`** — Ollama LLM (magic-grimoire:3b), temperature=0.0, num_predict=128, num_ctx=1024
+- **`get_llm()`** — Ollama LLM (magic-grimoire:3b), temperature=0.1, num_predict=2048, num_ctx=4096
 - **`get_embed_model()`** — FallbackEmbedding(primary=OllamaEmbedding(embed_batch_size=3))
   - Tries Ollama nomic-embed-text first
   - On failure → auto-switches to CPU sentence-transformers/all-MiniLM-L6-v2
@@ -161,10 +165,10 @@ dispatcher.py (dispatch update)
 - **`configure_settings()`** — sets LlamaIndex global Settings
 
 ### `app/rag/guard.py` — Ollama Guard
-- **`ollama_check_vram()`** — calls nvidia-smi, returns (free_mb, used_mb, total_mb)
+- **`ollama_check_vram()`** — async nvidia-smi call, returns (free_mb, used_mb, total_mb)
 - **`OllamaGuard.__aenter__()`** — checks VRAM + acquires semaphore
   - Blocks if >1 concurrent Ollama operation
-  - Returns guard object; raises if <500MB free VRAM or Ollama dead
+  - Returns guard object; raises if <1800MB free VRAM or Ollama dead
 - **`OllamaBusyError`, `OllamaDeadError`** — raised instead of generic exceptions
 - **`verify_ollama_on_startup()`** — called in main.py lifespan, logs warning but doesn't crash
 
@@ -175,12 +179,6 @@ dispatcher.py (dispatch update)
   - `_aget_query_embedding()`, `_get_query_embedding()` — for retrieval-time embedding
   - `_using_fallback` property — true once sentence-transformers activated
 
-### `app/rag/knowledge_cache.py` — Q&A Cache
-- **`search_cache()`** — cosine similarity on stored question embeddings
-  - Returns cached answer if similarity ≥ 0.92
-  - Fast path: bypasses RAG entirely for repeated queries
-- **`store_pair()`** — stores (question, question_embedding, answer, source_doc) in `knowledge_pairs`
-
 ### `app/rag/feedback.py` — Feedback Learning
 - **`FeedbackLearner`** — per-chat document scoring
   - `penalize_document()` — reduces score for wrongly-cited docs
@@ -188,11 +186,16 @@ dispatcher.py (dispatch update)
   - `get_blocked_docs()` — returns set of docs to deprioritize
   - `adjust_score()` — called in engine after retrieval, before LLM
 
+### `app/rag/prompts.py` — Prompt Templates
+- **`QA_NORMAL`** / `QA_SIMPLE` / `QA_ADVANCED` — question answering with difficulty variants
+- **`QUIZ_NORMAL`** / `QUIZ_SIMPLE` / `QUIZ_ADVANCED` — quiz generation
+- **`SUMMARY_PROMPT`** — topic summarization
+- **`QNA_PROMPT`** — comprehension Q&A pair generation (generic examples, no content anchoring)
+- All templates include "vary between sessions" instructions for answer diversity
+
 ### `app/ui/progress.py` — Progress Watcher
 - **`ProgressState`** — tracks phase, chunks_embedded, files_total, files_parsed, passges_found
 - **`ProgressWatcher`** — asyncio task that sends Telegram edits at t=0.5s, then escalating intervals
-  - Phases: index_parse → index_embed → generate → ...
-  - Reports current state every `interval` seconds
 
 ### `app/ui/helpers.py` — UI Helpers
 - **`_build_file_card()`** — builds a document card for `/docs` (filename, sizes, parse_method, verified, timestamp)
@@ -212,13 +215,13 @@ documents (
   word_count,         -- extracted from parsing
   chunk_count,        -- indexed chunks
   parse_method,       -- "ebooklib (EPUB)", "SimpleDirectoryReader", etc.
-  verified,            -- 1 if probe_index() passed after last build
-  indexed_at           -- last re-index timestamp
+  verified,           -- 1 if probe_index() passed after last build
+  indexed_at          -- last re-index timestamp
 )
 
 query_history (id, chat_id, query, response, created_at)
 
-knowledge_pairs (
+knowledge_pairs (     -- KEPT for reference but no longer active in engine.py
   id, question, question_embedding BLOB,
   short_answer, full_answer, source_doc,
   retrieval_score, approved, used_count, chat_id,
@@ -234,15 +237,15 @@ knowledge_pairs (
 |---|---|---|
 | `/ask <q>` | `StudyPlugin._handle_ask()` | Answer + source citations + next-step + diagnostics |
 | `/quiz <topic>` | `StudyPlugin._handle_quiz()` | Questions + sources + next-step + retrieval stats |
-| `/summarize <topic>` | `StudyPlugin._handle_summarize()` | Summary + sources + next-step + stats |
-| `/qna <topic>` | `StudyPlugin._handle_qna()` | Comprehension Q&A pairs (default 10) |
+| `/qna <topic> [count]` | `StudyPlugin._handle_qna()` | Q&A pairs + sources + next-step + retrieval stats |
+| `/summarize <topic>` | `StudyPlugin._handle_summarize()` | Summary + sources + next-step + retrieval stats |
 | `/docs` | `StudyPlugin._handle_docs()` | Document library with word counts, parse methods, probe status |
 | `/index` | `StudyPlugin._handle_index()` | Pre-check → parse → embed → probe → per-file report |
 | `/files` | `StudyPlugin._handle_files()` | All files on disk with indexed status + metadata |
 | `/delete <id>` | `StudyPlugin._handle_delete()` | Deletes file + shows impact (size/words/chunks) |
 | Free text | `BrainPlugin.handle()` | Gemini routes to appropriate tool |
 
-**Free text routing:** Gemini decides the tool, StudyPlugin is only invoked when `/ask` etc. are typed explicitly. For free text, BrainPlugin's `_tool_ask()` calls `ask_query()` directly.
+**Free text routing:** Gemini decides the tool, StudyPlugin is only invoked when `/ask` etc. are typed explicitly. For free text, BrainPlugin's tools call study handler functions directly.
 
 ---
 
@@ -258,30 +261,31 @@ All RAG responses follow this structure:
 💡 Next steps: Would you like a follow-up question, a `quiz` on this topic,
    or a `summary` of the key points? Just ask!
 
-📊 Retrieval: 3 chunks | ~420 tokens | k=3 | ctx=2048  ← diagnostics footer
+📊 Retrieval: 3 chunks | ~420 tokens | k=3 | ctx=4096  ← diagnostics footer
 ```
 
-Quiz/summary add `📖 Sources used:` between answer and next-step.
+Quiz/summary/qna add `📖 Sources used:` between answer and next-step.
 
 ---
 
 ## Modelfile Parameters (magic-grimoire:3b)
 
 ```
-temperature=0.0          # Deterministic — defense in depth
-num_ctx=2048             # Context window (API can extend to 4096)
-num_gpu=99               # All layers on GPU (power capped via MSI Afterburner)
-num_predict=2048         # Max output tokens (sent via API, overrides Modelfile)
+temperature=0.1          # Slight variation for repeated questions
+num_ctx=4096             # Context window for long answers
+num_gpu=99               # GPU layers (NOTE: should be 1 for Q4_0 — see PLAN.md)
+num_predict=2048         # Max output tokens
 repeat_penalty=1.1       # Slight discourage of repetition
 num_thread=4             # CPU thread count
 ```
 
-**VRAM budget (RTX 3050 8GB, optimized):**
+**VRAM budget (RTX 3050 8GB):**
 - LLM weights: 1.9 GB
-- KV cache: ~2.4 GB (2048 ctx)
+- KV cache (4096 ctx): ~2.4 GB
 - Embeddings (nomic): 0.3 GB
 - **Total: ~4.6 GB** (3.4 GB headroom)
-- Power capped at 80% via MSI Afterburner (~100W)
+
+CPU fallback (sentence-transformers) uses 0 VRAM — available when Ollama embed fails.
 
 ---
 
@@ -292,11 +296,13 @@ num_thread=4             # CPU thread count
 | L1 | `engine.query_with_sources()` | 0 chunks → early return, no LLM call |
 | L1b | `engine.query_with_sources()` | Token budget <50 → early return |
 | L2 | `engine.query_with_sources()` | 0 docs in index → early return |
-| L3 | `Modelfile.3b` | num_ctx=1024, num_predict=128, temp=0.0 |
-| L4 | `guard.py OllamaGuard` | VRAM pre-check before every Ollama call |
-| L5 | `engine.query_with_sources()` | TreeSummarize 30s timeout → fallback prompt |
+| L3 | `Modelfile.3b` | num_ctx=4096, num_predict=2048, temp=0.1 |
+| L4 | `guard.py OllamaGuard` | VRAM pre-check (async) before every Ollama call |
+| L5 | `engine.query_with_sources()` | TreeSummarize 120s timeout → fallback prompt |
 | L6 | `models.py warm_up()` | 2-token request pre-loads model into VRAM |
 | L7 | `embeddings.py FallbackEmbedding` | Ollama embed crash → auto-switch to CPU |
+
+**Additional safety:** `_tool_chat()` is wrapped in OllamaGuard — all Ollama calls go through the semaphore.
 
 ---
 
@@ -308,11 +314,13 @@ num_thread=4             # CPU thread count
 | FallbackEmbedding | Ollama Go runner crashes during batch embed → use CPU all-MiniLM-L6-v2 |
 | embed_batch_size=3 | Was 10 — too many concurrent calls crashed Ollama Go runtime |
 | os.path.basename for file_name metadata | Compare reliably between os.listdir() vs stored metadata |
-| tree_summarize over manual acomplete | Hierarchical synthesis but CPU/GPU intensive; 30s timeout + fallback protects |
-| num_ctx=1024 over 2048 | Halves KV cache → more VRAM headroom |
-| Temperature 0.0 | Deterministic output, defense in depth (Modelfile + models.py) |
+| tree_summarize over manual acomplete | Hierarchical synthesis; 120s timeout + fallback protects |
+| num_ctx=4096 | Enough headroom for long answers with 3B model |
+| Temperature 0.1 | Slight variation for repeated questions (was 0.0 — identical answers) |
 | Gemini for agent routing | Fast (~50ms), free tier, better intent classification than Ollama |
 | Detection footer for no-TOOL | If Gemini doesn't call a tool → "ℹ️ from training data" so user knows |
+| Knowledge cache removed | Stale answers from cache; fresh generation every time |
+| All Ollama calls through guard | `_tool_chat` included — prevents concurrent VRAM exhaustion |
 
 ---
 
@@ -376,14 +384,11 @@ ollama pull nomic-embed-text                       # Embeddings
 | "Ollama embed Go runner crashed" | Bot auto-switches to CPU fallback — retry `/index` |
 | "database disk image is malformed" | Delete `data/magic-grimoire.db` and restart |
 | PC crashed during `/index` | Install `sentence-transformers` for CPU fallback |
+| Wrong source cited | Say "that's from the wrong book" → feedback penalizes it |
+| "Ollama busy" message | Another query is running — wait for it to finish |
 
 ---
 
 ## Related
 
-- [PLAN.md](PLAN.md) — Development roadmap
-- [PLAN_audit_commands.md](PLAN_audit_commands.md) — Command UI audit plan
-- [PLAN_guardrails.md](PLAN_guardrails.md) — Guardrails implementation plan
-- [PLAN_crash.md](PLAN_crash.md) — WSL crash analysis
-- [PLAN_diagnostics.md](PLAN_diagnostics.md) — Diagnostic logging plan
-- [PLAN_verify_index.md](PLAN_verify_index.md) — Index verification plan
+- [PLAN.md](PLAN.md) — Development roadmap (canonical — all PLAN_*.md consolidated here)

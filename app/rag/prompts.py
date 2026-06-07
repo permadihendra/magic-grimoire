@@ -22,7 +22,9 @@ QA_NORMAL = QA_BASE + """
   understand both the what and the why
 - Quote relevant passages when helpful to support your points
 - If the question has multiple parts, address each one in order
-- Format in clear Markdown with sections for readability"""
+- Format in clear Markdown with sections for readability
+- Vary your approach between sessions. Use different examples,
+  structure, and emphasis each time you answer the same topic"""
 QA_SIMPLE = QA_BASE + """
 - Use VERY simple language — explain like the user is new to this topic
 - Avoid jargon; define any technical terms you must use
@@ -69,8 +71,8 @@ QUIZ_NORMAL = QUIZ_BASE + """
   ✅ Answer: B) [correct option] — [brief explanation]
 - After the full quiz, provide a brief answer KEY summarizing all answers.
 - Focus on concepts most likely to appear in professional assessments
-- Cover: key concepts, definitions, comparisons, edge cases, and applications
-"""
+- Vary your questions between sessions. Change scenarios, examples,
+  and emphasis. Don't repeat the exact same questions."""
 QUIZ_SIMPLE = QUIZ_BASE + """
 - Focus on basic recall and fundamental concepts
 - Use straightforward language
@@ -117,6 +119,8 @@ Guidelines:
 - Include a "Key Takeaways" section at the end
 - Write 3-5 paragraphs covering the main themes in detail
 - Connect related concepts and explain how they fit together
+- Vary your summary between sessions. Highlight different aspects,
+  use different organizational structure each time.
 
 Format cleanly in Markdown for Telegram.
 """
@@ -125,9 +129,14 @@ Format cleanly in Markdown for Telegram.
 
 QNA_PROMPT = """You are an exam preparation tutor. Based on the provided context from the user's study documents, generate {count} question + answer pairs for comprehension testing.
 
+Topic: {{query_str}}
+
 {personality}
 
 {existing_block}
+
+Context from the user's documents:
+{{context_str}}
 
 Guidelines:
 - Each pair: Q: [question] then A: [answer] on the next line
@@ -137,11 +146,14 @@ Guidelines:
 - Number each pair as [1], [2], etc.
 
 Format:
-[1] Q: What is the concept of dharma in the Bhagavad Gita?
-    A: Dharma refers to righteous duty... (2-4 sentences)
+[1] Q: [Clear question about the topic from the documents]
+    A: [Complete answer based only on the provided context]
 
-[2] Q: How does Krishna define karma yoga?
-    A: Karma yoga is the path of selfless action...
+[2] Q: [Another question on a different aspect of the topic]
+    A: [Answer with details from the provided context]
+
+- Vary your questions between sessions. Use different scenarios,
+  examples, and emphasis. Don't repeat the same Q&A pairs.
 """
 
 

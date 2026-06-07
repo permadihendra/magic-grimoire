@@ -31,9 +31,76 @@ logger = logging.getLogger(__name__)
 _rag_engine: RAGEngine | None = None
 _doc_indexer: DocumentIndexer | None = None
 
-# ── QnA history (complement-on-rerun) ───────────────────
-# key: (chat_id, topic_lower) → [{"q": ..., "a": ...}, ...]
-_qna_history: dict[tuple[int, str], list[dict]] = {}
+
+# ── Parse error → fix suggestion mapping ─────────────────
+
+def _parse_error_hint(error: str, fname: str) -> str:
+    """Map a parser error string to a specific, actionable fix suggestion."""
+    ext = os.path.splitext(fname)[1].lower()
+    error_lower = error.lower()
+
+    # EPUB-specific
+    if "ebooklib" in error_lower:
+        return "Run `uv sync --extra epub` to install EPUB support"
+    if "html2text" in error_lower:
+        return "Run `uv sync --extra epub` to install html2text"
+
+    # PDF-specific
+    if "liteparse" in error_lower:
+        return "Run `uv sync --extra liteparse` for better PDF parsing"
+
+    # Calibre-specific
+    if "calibre" in error_lower:
+        return "Install Calibre: `sudo apt install calibre` — or convert EPUB to PDF"
+
+    # Generic
+    if "empty text" in error_lower or "empty output" in error_lower:
+        if ext == ".epub":
+            return "EPUB may be DRM-protected or corrupted — try converting to PDF"
+        return "File may be corrupted or password-protected"
+
+    if "timeout" in error_lower:
+        return "File too large or complex — try splitting into smaller files"
+
+    if "no file bytes" in error_lower:
+        return "File may be empty or unreadable"
+
+    # Fallback: suggest format conversion
+    if ext in (".epub", ".mobi", ".azw"):
+        return "Try converting to PDF first, or run `uv sync --extra epub`"
+    return "Check that the file is not corrupted or password-protected"
+
+
+def _build_parse_suggestions(failed_files: list[tuple[str, str]]) -> str:
+    """Build a suggestions block for failed parse files.
+
+    Args:
+        failed_files: List of (filename, error) tuples.
+    """
+    if not failed_files:
+        return ""
+
+    # Collect unique suggestions
+    suggestions = []
+    seen = set()
+    for fname, error in failed_files:
+        hint = _parse_error_hint(error, fname)
+        if hint not in seen:
+            seen.add(hint)
+            suggestions.append(f"  • {hint}")
+
+    # Group by file
+    file_lines = []
+    for fname, error in failed_files:
+        ext = os.path.splitext(fname)[1].lower()
+        file_lines.append(f"  ❌ `{fname}` — {error}")
+
+    lines = ["\n*Failed files:*"] + file_lines
+    if suggestions:
+        lines.append("\n*Fixes (try in order):*")
+        lines.extend(suggestions)
+
+    return "\n".join(lines)
 
 
 class StudyPlugin(Plugin):
@@ -286,15 +353,13 @@ class StudyPlugin(Plugin):
     async def _handle_qna(self, ctx: BotContext) -> str | DispatchResult:
         """Handle /qna <topic> — generate comprehension Q&A pairs.
 
-        First call generates 10 Q&A pairs.
-        Second call on same topic generates 10 NEW pairs that complement.
+        Each call generates fresh Q&A pairs. No caching or history.
         """
-        global _rag_engine, _doc_indexer, _qna_history
+        global _rag_engine, _doc_indexer
 
         # Parse args
         text = ctx.message_text.strip()
         topic = text[len("/qna"):].strip()
-        # Parse optional count (e.g. "/qna krishna 15")
         count = 10
         if topic:
             parts = topic.rsplit(None, 1)
@@ -315,22 +380,33 @@ class StudyPlugin(Plugin):
         if error:
             return error
 
-        # Check for existing Q&A on this topic (complement-on-rerun)
-        key = (ctx.chat_id, topic.lower())
-        existing = _qna_history.get(key, [])
-        is_rerun = len(existing) > 0
-        start_num = len(existing) + 1  # numbering continues
-
-        logger.info("Generating %d Q&A on: %s (rerun=%s, existing=%d)", count, topic, is_rerun, len(existing))
-        await self._progress(ctx, f"📝 Generating {count} Q&A pairs" + (" (complementing previous)..." if is_rerun else "..."))
-
-        from app.rag.prompts import get_qna_prompt
+        logger.info("Generating %d Q&A pairs on: %s", count, topic)
+        await self._progress(ctx, "🔍 Searching documents for relevant passages...")
 
         try:
             t0 = time.time()
+
+            # Pre-retrieve passages to show preview (fast)
+            preview_passages = _rag_engine.retrieve_only(topic, chat_id=ctx.chat_id)
+            if preview_passages:
+                from app.rag.engine import _lookup_display_name
+                seen = set()
+                names = []
+                for p in preview_passages[:3]:
+                    sn = _lookup_display_name(p["filename"])
+                    if sn not in seen:
+                        seen.add(sn)
+                        names.append(f"{sn} ({p['score']:.2f})")
+                if names:
+                    preview = "🔍 *Found passages:* " + " · ".join(names)
+                    await self._progress(ctx, f"{preview}\n🧠 Generating {count} Q&A pairs...")
+                else:
+                    await self._progress(ctx, f"📝 Generating {count} Q&A pairs...")
+            else:
+                await self._progress(ctx, f"📝 Generating {count} Q&A pairs...")
+
             result = await _rag_engine.query_with_sources(
                 topic, mode="qna", count=count,
-                existing_pairs=existing if is_rerun else None,
                 chat_id=ctx.chat_id,
             )
             elapsed = time.time() - t0
@@ -341,7 +417,7 @@ class StudyPlugin(Plugin):
             if not answer_text or len(answer_text.strip()) < 50:
                 return "📭 *I couldn't generate meaningful Q&A pairs for this topic.*\n\nTry a different topic or check that your documents contain relevant material."
 
-            # Count generated pairs via pattern matching (handles any format)
+            # Count generated pairs via pattern matching
             import re
             q_markers = len(re.findall(
                 r'(?:^|\n)\s*(?:\[\d+\]|Q\d*[:.]|Question\s*\d*[:.]|^\d+[.])',
@@ -349,29 +425,16 @@ class StudyPlugin(Plugin):
             ))
             estimated = max(q_markers, 1)
 
-            # Store raw text in history
-            new_pairs = [{"q": topic, "a": answer_text}]
-            _qna_history[key] = existing + new_pairs
-            total_pairs = len(existing) + estimated
-
-            # Build display text — show raw model output directly
+            # Build display text — fresh results every time
             header = f"📝 *Q&A: {topic}* (est. {estimated} pairs)"
-            if is_rerun:
-                header += f" — Part {len(existing)//count + 1}"
-
             lines = [header, "", answer_text, ""]
 
-            # Footer
-            lines.append(f"_Total: {total_pairs} pairs across {total_pairs // count} session(s)_")
-            if not is_rerun:
-                lines.append("💡 *Want more?* Send `/qna " + topic + "` again for complementary questions!")
+            # Footer — fresh generation info
+            lines.append(f"_Generated ~{estimated} new pairs_")
+            lines.append("💡 *Want more?* Send `/qna " + topic + "` again for fresh questions!")
 
-            # Build follow-up (next-step + stats)
-            total_tokens = sum(len(t.split()) * 1.3 for t in chunk_texts)
-            follow_up = (
-                f"📊 *Retrieval:* {len(chunk_texts)} chunks | ~{int(total_tokens)} tokens | k=3\n"
-                f"📝 Generated: ~{estimated} pairs in {elapsed:.1f}s"
-            )
+            # Build follow-up (retrieval stats from engine)
+            follow_up = result.get("follow_up", "") if isinstance(result, dict) else ""
 
             processing = {
                 "follow_up": follow_up,
@@ -457,9 +520,11 @@ class StudyPlugin(Plugin):
                     f"   └─ {result.method} ✅ — {result.word_count:,} words\n"
                 )
             else:
+                hint = _parse_error_hint(result.error or "parsing failed", fname)
                 pre_lines.append(
                     f"📄 [{i}/{len(files)}] `{fname}` ({size_mb:.1f} MB)\n"
                     f"   └─ ❌ {result.error or 'parsing failed'}\n"
+                    f"   └─ 💡 {hint}\n"
                 )
 
         pre_text = "\n".join(pre_lines)
@@ -467,14 +532,19 @@ class StudyPlugin(Plugin):
         # Block if ALL files failed parsing
         if success_count == 0:
             logger.error("All %d files failed pre-index check", len(files))
+
+            # Collect per-file errors for specific suggestions
+            failed_files = []
+            for fname in files:
+                fpath = os.path.join(docs_dir, fname)
+                result = await _doc_indexer.pre_index_check_single(fpath, fname)
+                if not result.success:
+                    failed_files.append((fname, result.error or "unknown"))
+
+            suggestions = _build_parse_suggestions(failed_files)
             block_msg = (
-                "❌ *No documents could be parsed.*\n\n"
-                "All files failed during pre-index check.\n\n"
-                "Suggestions:\n"
-                "1. `uv sync --extra epub` — install EPUB support\n"
-                "2. `uv sync --extra liteparse` — install PDF/OCR support\n"
-                "3. Convert EPUB to PDF and re-upload\n"
-                "4. Try a plain .txt file\n\n"
+                f"❌ *No documents could be parsed.*\n\n"
+                f"{suggestions}\n\n"
                 "⚠️ Your old index is preserved. Bot is still functional."
             )
             if msg_id:
@@ -539,7 +609,9 @@ class StudyPlugin(Plugin):
                     f"📄 `{fname}` — ✅ {result.word_count:,} words | {file_chunks} chunks"
                 )
             elif error:
+                hint = _parse_error_hint(error[1], fname)
                 file_lines.append(f"📄 `{fname}` — ❌ {error[1][:60]}")
+                file_lines.append(f"   💡 {hint}")
             else:
                 file_lines.append(f"📄 `{fname}` — ❌ unknown error")
 
@@ -553,7 +625,7 @@ class StudyPlugin(Plugin):
         )
 
         if failed > 0:
-            result_text += f"\n⚠️ {failed} file(s) could not be parsed.\n"
+            result_text += f"\n⚠️ {failed} file(s) could not be parsed."
 
         if chunks == 0:
             result_text += ("\n❌ *WARNING: 0 chunks indexed.*\n"
